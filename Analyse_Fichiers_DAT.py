@@ -2691,7 +2691,7 @@ class DatEditor:
         win = tk.Toplevel(self.root)
         win.title("Dupliquer une branche")
         # On augmente la taille et on autorise le redimensionnement
-        win.geometry("800x650") 
+        win.geometry("800x550") 
         win.resizable(True, True) 
         win.configure(bg="#ecf0f1")
         
