@@ -986,7 +986,7 @@ class DatEditor:
 
         # === VARIABLES DE PAGINATION (NOUVEAU) ===
         self.view_start = 0      # Index de départ
-        self.view_limit = 1000    # Nombre de lignes affichées (taille de la fenêtre)
+        self.view_limit = 5000    # Nombre de lignes affichées (taille de la fenêtre)
         self.view_step = 250     # Décalage lors du clic (overlap)
         
         # Configuration du style global
@@ -1766,7 +1766,7 @@ class DatEditor:
             self.tree.column(col, width=150, anchor='center', stretch=True)
     
         # === OPTIMISATION FENÊTRAGE ===
-        DISPLAY_LIMIT = 1000
+        DISPLAY_LIMIT = 5000
         total_filtered = len(self.filtered_indices)
         
         # Calcul de la plage d'affichage (Start - End)
@@ -2216,8 +2216,8 @@ class DatEditor:
         if display_info:
             start, end = display_info
             range_msg = f"[Vue: {start+1}-{end}]"
-        elif visible_total > 1000:
-            range_msg = f"[Vue: 1-1000]"
+        elif visible_total > 5000:
+            range_msg = f"[Vue: 1-5000]"
             
         selection = self.tree.selection()
         line_text = "-"
@@ -2687,189 +2687,234 @@ class DatEditor:
                   font=("Segoe UI", 11, "bold")).pack(side="left", padx=5)
     
     def open_duplicate_branch_window(self):
-        """Ouvre une fenêtre pour définir la source et la destination de la duplication."""
+        """Ouvre la fenêtre de duplication avec une disposition optimisée (Côte à Côte)."""
         win = tk.Toplevel(self.root)
-        win.title("Duplication de Branche")
-        win.geometry("600x750")
-        win.config(bg="#ecf0f1")
+        win.title("Dupliquer une branche")
+        # On augmente la taille et on autorise le redimensionnement
+        win.geometry("800x650") 
+        win.resizable(True, True) 
+        win.configure(bg="#ecf0f1")
         
-        # --- Zone Source ---
-        lbl_src = tk.LabelFrame(win, text="1. Branche SOURCE (Ce qu'il faut copier)", bg="#ecf0f1", font=("Segoe UI", 10, "bold"), fg="#c0392b")
-        lbl_src.pack(fill="x", padx=10, pady=10)
+        # --- En-tête ---
+        header_frame = tk.Frame(win, bg="#ecf0f1")
+        header_frame.pack(fill='x', pady=(10, 5), padx=10)
+        
+        tk.Label(header_frame, text="Niveau", font=("Segoe UI", 9, "bold"), bg="#ecf0f1", width=6).pack(side='left')
+        tk.Label(header_frame, text="Branche SOURCE (Actuelle)", font=("Segoe UI", 9, "bold"), bg="#ecf0f1", fg="#7f8c8d").pack(side='left', expand=True)
+        tk.Label(header_frame, text="  ➔  ", font=("Segoe UI", 12, "bold"), bg="#ecf0f1", fg="#95a5a6").pack(side='left')
+        tk.Label(header_frame, text="Branche DESTINATION (Nouvelle)", font=("Segoe UI", 9, "bold"), bg="#ecf0f1", fg="#27ae60").pack(side='left', expand=True)
+
+        # --- Conteneur principal pour les lignes n1..n11 ---
+        main_content = tk.Frame(win, bg="#ecf0f1")
+        main_content.pack(fill='both', expand=True, padx=10)
         
         src_entries = []
-        frame_src_grid = tk.Frame(lbl_src, bg="#ecf0f1")
-        frame_src_grid.pack(fill="x", padx=5, pady=5)
-        
-        for i in range(11): # n1 à n11
-            tk.Label(frame_src_grid, text=f"n{i+1}", bg="#ecf0f1", width=4).grid(row=i, column=0, padx=2, pady=2)
-            e = tk.Entry(frame_src_grid, width=40)
-            e.grid(row=i, column=1, padx=2, pady=2)
-            src_entries.append(e)
-
-        # --- Zone Destination ---
-        lbl_dst = tk.LabelFrame(win, text="2. Branche DESTINATION (Où coller)", bg="#ecf0f1", font=("Segoe UI", 10, "bold"), fg="#27ae60")
-        lbl_dst.pack(fill="x", padx=10, pady=10)
-        
         dst_entries = []
-        frame_dst_grid = tk.Frame(lbl_dst, bg="#ecf0f1")
-        frame_dst_grid.pack(fill="x", padx=5, pady=5)
         
-        for i in range(11): # n1 à n11
-            tk.Label(frame_dst_grid, text=f"n{i+1}", bg="#ecf0f1", width=4).grid(row=i, column=0, padx=2, pady=2)
-            e = tk.Entry(frame_dst_grid, width=40)
-            e.grid(row=i, column=1, padx=2, pady=2)
-            dst_entries.append(e)
+        # Création des lignes n1 à n11
+        for i in range(1, 12):
+            row_frame = tk.Frame(main_content, bg="#ecf0f1")
+            row_frame.pack(fill='x', pady=2)
             
-        # --- Bouton Action ---
-        btn_action = tk.Button(win, text="EXÉCUTER LA DUPLICATION", 
-                               bg="#3498db", fg="white", font=("Segoe UI", 12, "bold"),
-                               command=lambda: self.perform_branch_duplication(src_entries, dst_entries, win))
-        btn_action.pack(pady=20, ipadx=10, ipady=5)
-        
-        tk.Label(win, text="Note: Les variables copiées seront ajoutées à la fin du fichier.", bg="#ecf0f1", fg="#7f8c8d").pack()
+            # Label n1, n2...
+            tk.Label(row_frame, text=f"n{i}", width=6, bg="#bdc3c7", font=("Segoe UI", 8, "bold")).pack(side='left')
+            
+            # Champ Source
+            e_src = tk.Entry(row_frame, bg="white", relief="flat")
+            e_src.pack(side='left', fill='x', expand=True, padx=(5, 0))
+            src_entries.append(e_src)
+            
+            # Flèche visuelle
+            tk.Label(row_frame, text="➔", bg="#ecf0f1", fg="#95a5a6").pack(side='left', padx=5)
+            
+            # Champ Destination
+            e_dst = tk.Entry(row_frame, bg="#eafaf1", relief="flat") # Fond vert très clair pour distinguer
+            e_dst.pack(side='left', fill='x', expand=True, padx=(0, 5))
+            dst_entries.append(e_dst)
 
-    def get_next_tag_id(self):
-        """Calcule le prochain TagName disponible (Max + 1) sur tout le fichier."""
-        # 1. Trouver la colonne TagName
-        tag_col_index = -1
-        for idx, h in enumerate(self.headers):
-            if h.lower() == "tagname":
-                tag_col_index = idx
-                break
+        # --- Pré-remplissage intelligent ---
+        selected = self.tree.selection()
+        if selected:
+            idx = int(selected[0])
+            row = self.data[idx]
+            for i in range(11):
+                col_name = f"n{i+1}"
+                # On cherche aussi les variantes (Chemin n1, Level 1...)
+                if col_name not in self.headers:
+                    # Tentative de fallback simple
+                    continue
+                    
+                val = row[self.headers.index(col_name)]
+                src_entries[i].insert(0, val)
+                # On pré-remplit aussi la destination pour gagner du temps
+                dst_entries[i].insert(0, val)
+
+        # --- Zone Rechercher / Remplacer (En bas) ---
+        frame_options = tk.Frame(win, bg="#dcdcdc", padx=10, pady=10)
+        frame_options.pack(fill='x', side='bottom')
+
+        # Titre option
+        tk.Label(frame_options, text="OPTIONS DE REMPLACEMENT", bg="#dcdcdc", font=("Segoe UI", 9, "bold"), fg="#2c3e50").pack(anchor='w')
+
+        grid_frame = tk.Frame(frame_options, bg="#dcdcdc")
+        grid_frame.pack(fill='x', pady=5)
         
-        if tag_col_index == -1:
-            return 1 # Pas de colonne TagName, on commence à 1
-            
-        # 2. Trouver le Max absolu
-        current_max = 0
-        for row in self.data:
-            if tag_col_index < len(row):
-                val = str(row[tag_col_index]).strip()
-                if val.isdigit():
-                    val_int = int(val)
-                    # MODIFICATION : On a retiré la limite < 65535.
-                    # On prend le max absolu trouvé.
-                    if val_int > current_max:
-                        current_max = val_int
-                        
-        return current_max + 1
+        tk.Label(grid_frame, text="Rechercher ce texte :", bg="#dcdcdc").grid(row=0, column=0, sticky='e', padx=5)
+        entry_find = tk.Entry(grid_frame, width=25)
+        entry_find.grid(row=0, column=1, padx=5)
+        
+        tk.Label(grid_frame, text="Remplacer par :", bg="#dcdcdc").grid(row=0, column=2, sticky='e', padx=5)
+        entry_replace = tk.Entry(grid_frame, width=25)
+        entry_replace.grid(row=0, column=3, padx=5)
+
+        # Bouton Action (Bien visible à droite)
+        btn_action = tk.Button(grid_frame, text="DUPLIQUER LA BRANCHE", 
+                               bg=self.COLORS["success"], fg="white", font=("Segoe UI", 10, "bold"),
+                               command=lambda: self.perform_branch_duplication(src_entries, dst_entries, entry_find, entry_replace, win))
+        btn_action.grid(row=0, column=4, rowspan=2, padx=20, ipadx=10, ipady=5)
+        
+        tk.Label(grid_frame, text="(Laisser vide pour copier à l'identique)", bg="#dcdcdc", fg="#7f8c8d", font=("Segoe UI", 8)).grid(row=1, column=0, columnspan=4, pady=2)
     
-    def perform_branch_duplication(self, src_widgets, dst_widgets, window):
+    def perform_branch_duplication(self, src_widgets, dst_widgets, find_widget, replace_widget, window):
         """
-        Logique de copie intelligente (Flexible sur les colonnes + TagName illimité).
+        Logique de duplication avec prise en compte de la recherche/remplacement.
         """
-        # 1. Récupération des saisies utilisateur
-        src_path = [e.get().strip() for e in src_widgets]
-        dst_path = [e.get().strip() for e in dst_widgets]
-        
-        while src_path and src_path[-1] == "": src_path.pop()
-        while dst_path and dst_path[-1] == "": dst_path.pop()
-        
-        if not src_path:
-            messagebox.showwarning("Attention", "La branche source est vide. Veuillez spécifier au moins n1.")
-            return
-
-        # 2. Identification des colonnes n1..n11 (FLEXIBLE)
-        n_indices = []
-        columns_found_count = 0
-        
-        for i in range(1, 12): 
-            found_idx = -1
-            possible_names = [f"n{i}", f"Chemin n{i}", f"N{i}", f"Level {i}"]
-            for name in possible_names:
-                if name in self.headers:
-                    found_idx = self.headers.index(name)
-                    columns_found_count += 1
-                    break
-            n_indices.append(found_idx)
-
-        if columns_found_count == 0:
-            messagebox.showerror("Erreur", "Aucune colonne de niveau (n1, n2...) trouvée.")
-            return
-
-        # --- GESTION DU TAGNAME VIA LA NOUVELLE FONCTION ---
-        # On calcule le prochain ID une seule fois au début
-        next_tag_id = self.get_next_tag_id()
-        
-        # On retrouve l'index de la colonne pour l'écriture
-        tag_col_index = -1
-        for idx, h in enumerate(self.headers):
-            if h.lower() == "tagname":
-                tag_col_index = idx
-                break
-
-        # 3. Parcours et Copie
-        new_rows = []
-        count_copied = 0
-        src_len = len(src_path)
-        
-        for row in self.data:
-            # A. Reconstruction chemin
-            row_path = []
-            for idx in n_indices:
-                if idx != -1 and idx < len(row):
-                    row_path.append(str(row[idx]).strip())
-                else:
-                    row_path.append("")
+        try:
+            # 1. Récupération des données du formulaire
+            src_path = [e.get().strip() for e in src_widgets]
+            dst_path = [e.get().strip() for e in dst_widgets]
             
-            # B. Match Source
-            is_match = True
-            for k in range(src_len):
-                if k < len(row_path):
-                    if row_path[k] != src_path[k]:
+            # Récupération sécurisée du texte Find/Replace
+            # On utilise .get() sur les widgets Entry passés en paramètres
+            txt_find = find_widget.get() 
+            txt_replace = replace_widget.get()
+
+            # Nettoyage des niveaux vides à la fin (n11, n10...)
+            while src_path and src_path[-1] == "": src_path.pop()
+            while dst_path and dst_path[-1] == "": dst_path.pop()
+            
+            if not src_path:
+                messagebox.showwarning("Attention", "La branche source est vide (n1 non défini).")
+                return
+
+            # 2. Identification des colonnes n1..n11 dans le fichier
+            n_indices = []
+            col_found = False
+            for i in range(1, 12): 
+                found_idx = -1
+                possible_names = [f"n{i}", f"Chemin n{i}", f"N{i}", f"Level {i}"]
+                for name in possible_names:
+                    if name in self.headers:
+                        found_idx = self.headers.index(name)
+                        col_found = True
+                        break
+                n_indices.append(found_idx)
+
+            if not col_found:
+                messagebox.showerror("Erreur", "Aucune colonne de niveau (n1..) trouvée dans le fichier.")
+                return
+
+            # 3. Préparation TagName (ID Unique)
+            # On utilise la méthode self.get_next_tag_id() qu'on a créée tout au début
+            # Si elle n'existe pas, on fait un fallback simple
+            if hasattr(self, 'get_next_tag_id'):
+                next_tag_id = self.get_next_tag_id()
+            else:
+                next_tag_id = 100000 # Fallback au cas où
+                
+            tag_col_index = -1
+            for idx, h in enumerate(self.headers):
+                if h.lower() == "tagname":
+                    tag_col_index = idx
+                    break
+
+            # 4. Parcours et Copie
+            new_rows = []
+            count_copied = 0
+            src_len = len(src_path)
+            
+            # SAUVEGARDE POUR LE CTRL+Z (Undo)
+            if hasattr(self, 'save_full_state_for_undo'):
+                self.save_full_state_for_undo()
+
+            for row in self.data:
+                # A. Reconstruction du chemin de la ligne en cours
+                row_path = []
+                for idx in n_indices:
+                    val = str(row[idx]).strip() if idx != -1 and idx < len(row) else ""
+                    row_path.append(val)
+                
+                # B. Vérification : Est-ce que cette ligne appartient à la branche source ?
+                is_match = True
+                for k in range(src_len):
+                    if k >= len(row_path) or row_path[k] != src_path[k]:
                         is_match = False
                         break
-                else:
-                    is_match = False
-                    break
-            
-            if is_match:
-                new_row = list(row) 
                 
-                # C. Nouveau chemin
-                suffix = row_path[src_len:]
-                final_path = dst_path + suffix
+                if is_match:
+                    # C'est un match ! On copie la ligne
+                    new_row = list(row)
+                    
+                    # === C. RECHERCHER / REMPLACER GLOBAL ===
+                    # Si l'utilisateur a entré un texte à chercher (txt_find n'est pas vide)
+                    if txt_find:
+                        for c_i in range(len(new_row)):
+                            current_val = str(new_row[c_i])
+                            if txt_find in current_val:
+                                # Remplacement simple
+                                new_row[c_i] = current_val.replace(txt_find, txt_replace)
+                    # ========================================
+                    
+                    # D. Application de la nouvelle hiérarchie (Destination)
+                    # On garde le suffixe (ce qui est après la branche commune)
+                    suffix = row_path[src_len:]
+                    final_path = dst_path + suffix
+                    
+                    for k, col_idx in enumerate(n_indices):
+                        if col_idx != -1:
+                            if k < len(final_path):
+                                # On s'assure que la ligne est assez longue
+                                while len(new_row) <= col_idx: new_row.append("")
+                                new_row[col_idx] = final_path[k]
+                            else:
+                                if col_idx < len(new_row): new_row[col_idx] = ""
+
+                    # E. Nouveau ID (TagName)
+                    if tag_col_index != -1:
+                        while len(new_row) <= tag_col_index: new_row.append("")
+                        new_row[tag_col_index] = str(next_tag_id)
+                        next_tag_id += 1
+                    
+                    new_rows.append(new_row)
+                    count_copied += 1
+
+            # 5. Finalisation
+            if count_copied > 0:
+                self.data.extend(new_rows)
                 
-                for k, col_idx in enumerate(n_indices):
-                    if col_idx != -1:
-                        if k < len(final_path):
-                            while len(new_row) <= col_idx: new_row.append("")
-                            new_row[col_idx] = final_path[k]
-                        else:
-                            if col_idx < len(new_row): new_row[col_idx] = ""
-
-                # D. Nouveau TagName
-                if tag_col_index != -1:
-                    while len(new_row) <= tag_col_index: new_row.append("")
-                    new_row[tag_col_index] = str(next_tag_id)
-                    next_tag_id += 1 # On incrémente pour la prochaine ligne copiée
+                # Mise à jour affichage
+                self.filtered_indices = list(range(len(self.data)))
+                self.refresh_tree()
                 
-                new_rows.append(new_row)
-                count_copied += 1
+                # Scroll tout en bas pour montrer les nouvelles lignes
+                try:
+                    self.tree.see(str(len(self.data)-1))
+                except: pass
 
-        # 4. Sauvegarde et Scroll
-        if count_copied > 0:
-            start_index = len(self.data)
-            self.data.extend(new_rows)
-            end_index = len(self.data)
-            
-            new_indices = list(range(start_index, end_index))
-            self.filtered_indices.extend(new_indices)
-            
-            self.refresh_tree()
-            
-            last_item_id = str(end_index - 1)
-            try:
-                self.tree.see(last_item_id)
-                self.tree.selection_set(last_item_id)
-            except: pass
+                self.modified = True
+                
+                msg = f"{count_copied} variables dupliquées avec succès."
+                if txt_find:
+                    msg += f"\nRemplacement appliqué : '{txt_find}' -> '{txt_replace}'"
+                
+                messagebox.showinfo("Succès", msg)
+                window.destroy() # Fermeture de la pop-up
+            else:
+                messagebox.showwarning("Résultat", "Aucune variable trouvée correspondant à la branche source spécifiée.")
 
-            msg = f"{count_copied} variables dupliquées (IDs démarrant à {next_tag_id - count_copied})."
-            messagebox.showinfo("Succès", msg)
-            window.destroy()
-        else:
-            messagebox.showwarning("Résultat", "Aucune variable trouvée pour cette branche source.")
+        except Exception as e:
+            # C'est ce bloc qui va vous dire pourquoi "il ne se passe rien"
+            messagebox.showerror("Erreur Critique", f"Une erreur est survenue lors de la duplication :\n{str(e)}")
             
     def open_create_variable(self):
         win = tk.Toplevel(self.root)
