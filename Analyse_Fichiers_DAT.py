@@ -986,7 +986,7 @@ class DatEditor:
 
         # === VARIABLES DE PAGINATION (NOUVEAU) ===
         self.view_start = 0      # Index de départ
-        self.view_limit = 5000    # Nombre de lignes affichées (taille de la fenêtre)
+        self.view_limit = 2500    # Nombre de lignes affichées (taille de la fenêtre)
         self.view_step = 250     # Décalage lors du clic (overlap)
         
         # Configuration du style global
@@ -1766,7 +1766,7 @@ class DatEditor:
             self.tree.column(col, width=150, anchor='center', stretch=True)
     
         # === OPTIMISATION FENÊTRAGE ===
-        DISPLAY_LIMIT = 5000
+        DISPLAY_LIMIT = 2500
         total_filtered = len(self.filtered_indices)
         
         # Calcul de la plage d'affichage (Start - End)
@@ -2216,8 +2216,8 @@ class DatEditor:
         if display_info:
             start, end = display_info
             range_msg = f"[Vue: {start+1}-{end}]"
-        elif visible_total > 5000:
-            range_msg = f"[Vue: 1-5000]"
+        elif visible_total > 2500:
+            range_msg = f"[Vue: 1-2500]"
             
         selection = self.tree.selection()
         line_text = "-"
@@ -2778,6 +2778,7 @@ class DatEditor:
     def perform_branch_duplication(self, src_widgets, dst_widgets, find_widget, replace_widget, window):
         """
         Logique de duplication avec prise en compte de la recherche/remplacement.
+        CORRIGÉ : Gestion TagName et Rechercher/Remplacer effectif.
         """
         try:
             # 1. Récupération des données du formulaire
@@ -2785,7 +2786,6 @@ class DatEditor:
             dst_path = [e.get().strip() for e in dst_widgets]
             
             # Récupération sécurisée du texte Find/Replace
-            # On utilise .get() sur les widgets Entry passés en paramètres
             txt_find = find_widget.get() 
             txt_replace = replace_widget.get()
 
@@ -2797,7 +2797,7 @@ class DatEditor:
                 messagebox.showwarning("Attention", "La branche source est vide (n1 non défini).")
                 return
 
-            # 2. Identification des colonnes n1..n11 dans le fichier
+            # 2. Identification des colonnes n1..n11 et TagName
             n_indices = []
             col_found = False
             for i in range(1, 12): 
@@ -2814,20 +2814,18 @@ class DatEditor:
                 messagebox.showerror("Erreur", "Aucune colonne de niveau (n1..) trouvée dans le fichier.")
                 return
 
-            # 3. Préparation TagName (ID Unique)
-            # On utilise la méthode self.get_next_tag_id() qu'on a créée tout au début
-            # Si elle n'existe pas, on fait un fallback simple
-            if hasattr(self, 'get_next_tag_id'):
-                next_tag_id = self.get_next_tag_id()
-            else:
-                next_tag_id = 100000 # Fallback au cas où
-                
             tag_col_index = -1
             for idx, h in enumerate(self.headers):
                 if h.lower() == "tagname":
                     tag_col_index = idx
                     break
 
+            # 3. Préparation TagName (ID Unique)
+            # On récupère le DERNIER ID du tableau (sans +1)
+            last_known_id = self.get_last_tag_id()
+            # Le prochain sera donc le dernier + 1
+            next_tag_id = last_known_id + 1
+        
             # 4. Parcours et Copie
             new_rows = []
             count_copied = 0
@@ -2856,13 +2854,16 @@ class DatEditor:
                     new_row = list(row)
                     
                     # === C. RECHERCHER / REMPLACER GLOBAL ===
-                    # Si l'utilisateur a entré un texte à chercher (txt_find n'est pas vide)
-                    if txt_find:
-                        for c_i in range(len(new_row)):
-                            current_val = str(new_row[c_i])
-                            if txt_find in current_val:
-                                # Remplacement simple
-                                new_row[c_i] = current_val.replace(txt_find, txt_replace)
+                    # (Correction : Le code était manquant ici)
+                    if txt_find: 
+                        for i in range(len(new_row)):
+                            # On ne touche PAS à la colonne TagName ni aux colonnes de hiérarchie (qui seront écrasées après)
+                            if i == tag_col_index: continue
+                            if i in n_indices: continue 
+                            
+                            val = str(new_row[i])
+                            if txt_find in val:
+                                new_row[i] = val.replace(txt_find, txt_replace)
                     # ========================================
                     
                     # D. Application de la nouvelle hiérarchie (Destination)
@@ -2873,17 +2874,17 @@ class DatEditor:
                     for k, col_idx in enumerate(n_indices):
                         if col_idx != -1:
                             if k < len(final_path):
-                                # On s'assure que la ligne est assez longue
                                 while len(new_row) <= col_idx: new_row.append("")
                                 new_row[col_idx] = final_path[k]
                             else:
                                 if col_idx < len(new_row): new_row[col_idx] = ""
 
                     # E. Nouveau ID (TagName)
+                    # Correction : On le fait UNE SEULE FOIS ici
                     if tag_col_index != -1:
                         while len(new_row) <= tag_col_index: new_row.append("")
                         new_row[tag_col_index] = str(next_tag_id)
-                        next_tag_id += 1
+                        next_tag_id += 1 # On incrémente de 1 seulement
                     
                     new_rows.append(new_row)
                     count_copied += 1
@@ -2898,7 +2899,7 @@ class DatEditor:
                 
                 # Scroll tout en bas pour montrer les nouvelles lignes
                 try:
-                    self.tree.see(str(len(self.data)-1))
+                    self.tree.yview_moveto(1) # Scroll tout en bas plus fiable
                 except: pass
 
                 self.modified = True
@@ -2913,9 +2914,8 @@ class DatEditor:
                 messagebox.showwarning("Résultat", "Aucune variable trouvée correspondant à la branche source spécifiée.")
 
         except Exception as e:
-            # C'est ce bloc qui va vous dire pourquoi "il ne se passe rien"
             messagebox.showerror("Erreur Critique", f"Une erreur est survenue lors de la duplication :\n{str(e)}")
-            
+
     def open_create_variable(self):
         win = tk.Toplevel(self.root)
         win.title("Création de variable")
@@ -3444,58 +3444,107 @@ class DatEditor:
                   font=("Segoe UI", 11, "bold")
         ).pack(side='right', padx=20, expand=True) 
             
+    def get_last_tag_id(self):
+        """
+        Renvoie le DERNIER ID trouvé en bas du tableau (sans ajouter +1).
+        """
+        # 1. Trouver la colonne TagName
+        tag_col_index = -1
+        for idx, h in enumerate(self.headers):
+            if h.strip().lower() == "tagname":
+                tag_col_index = idx
+                break
+        
+        # Si pas de colonne, on renvoie une valeur de base (ex: 99999 pour que le prochain soit 100000)
+        if tag_col_index == -1:
+            return 99999
+            
+        rows = self.data
+        if not rows:
+            return 99999
+
+        # Fonction interne pour lire l'ID
+        def extract_id(row_data):
+            if tag_col_index < len(row_data):
+                val_str = str(row_data[tag_col_index]).strip()
+                if val_str.isdigit():
+                    return int(val_str)
+            return None
+
+        # 2. Regarder la dernière ligne (-1)
+        last_id = extract_id(rows[-1])
+        
+        # 3. Si vide, regarder l'avant-dernière (-2)
+        if last_id is None and len(rows) > 1:
+            last_id = extract_id(rows[-2])
+
+        # 4. Retourner l'ID tel quel (ou le défaut)
+        return last_id if last_id is not None else 99999
+    
     def create_variable(self, var_class, var_name, path_elements, adv_values=None):
-        col_name = self.find_header("Nom")
-        col_class = self.find_header("Class")
-        col_tag = self.find_header("Tagname")
-        
-        new_row = [""] * len(self.headers)
-        
-        if col_name:
-            new_row[self.headers.index(col_name)] = var_name
-        if col_class:
-            new_row[self.headers.index(col_class)] = var_class
-        
-        for i, elem in enumerate(path_elements[:11]):
-            col = f"n{i+1}"
-            if col in self.headers:
-                new_row[self.headers.index(col)] = elem
-        
-        template = self.VAREXP_TEMPLATES.get(var_class, {})
-        for col, val in template.items():
-            if col in self.headers:
-                new_row[self.headers.index(col)] = val
-        
-        if adv_values:
-            for col, val in adv_values.items():
+        try:
+            # Recherche des index de colonnes
+            col_name_idx = -1
+            col_class_idx = -1
+            col_tag_idx = -1
+            
+            for i, h in enumerate(self.headers):
+                h_low = h.lower()
+                if h_low == "nom": col_name_idx = i
+                elif h_low == "class": col_class_idx = i
+                elif h_low == "tagname": col_tag_idx = i
+
+            new_row = [""] * len(self.headers)
+            
+            # Remplissage Nom et Classe
+            if col_name_idx != -1: new_row[col_name_idx] = var_name
+            if col_class_idx != -1: new_row[col_class_idx] = var_class
+            
+            # Remplissage n1..n11
+            for i, elem in enumerate(path_elements[:11]):
+                col_h = f"n{i+1}"
+                if col_h in self.headers:
+                    new_row[self.headers.index(col_h)] = elem
+            
+            # Templates par défaut
+            template = self.VAREXP_TEMPLATES.get(var_class, {})
+            for col, val in template.items():
                 if col in self.headers:
                     new_row[self.headers.index(col)] = val
-        
-        # =================================================================
-        # C'EST ICI QU'ON MODIFIE POUR AVOIR LE BON TAG ID (> 65535)
-        # =================================================================
-        if col_tag:
-            # On utilise la fonction qui recalcule le vrai MAX à chaque fois
-            tag_id = self.get_next_tag_id()
-            new_row[self.headers.index(col_tag)] = str(tag_id)
             
-            # (Optionnel) On peut mettre à jour self.last_tagname si vous l'utilisez ailleurs
-            self.last_tagname = tag_id 
-        # =================================================================
+            # Valeurs avancées
+            if adv_values:
+                for col, val in adv_values.items():
+                    if col in self.headers:
+                        new_row[self.headers.index(col)] = val
+            
+            # === C'EST ICI LA CORRECTION IMPORTANTE ===
+            if col_tag_idx != -1:
+                # On récupère le dernier (ex: 100000)
+                last_id = self.get_last_tag_id()
+                
+                # On ajoute 1 (ex: 100001)
+                new_id = last_id + 1
+                new_row[col_tag_idx] = str(new_id)
+            # ==========================================
 
-        real_index = len(self.data)
-        
-        # Undo
-        self.undo_stack.append([(real_index, None)])
-        
-        self.data.append(new_row)
-        self.modified = True
-        
-        # Refresh filtre (recalcule les indices)
-        self.apply_filter() 
-        
-        # Force le scroll tout en bas pour voir la nouvelle ligne créée
-        self.scroll_bottom()
+            # Sauvegarde Undo
+            if hasattr(self, 'save_full_state_for_undo'):
+                self.save_full_state_for_undo()
+
+            # Ajout au tableau
+            self.data.append(new_row)
+            self.modified = True
+            
+            # Mise à jour affichage
+            self.filtered_indices = list(range(len(self.data)))
+            self.refresh_tree()
+            self.scroll_bottom()
+            
+            messagebox.showinfo("Succès", f"Variable '{var_name}' créée (ID: {new_row[col_tag_idx]}).")
+
+        except Exception as e:
+            messagebox.showerror("Erreur Création", f"Impossible de créer la variable :\n{e}")
 
     # ================= COLONNES =================
     def select_columns(self):
