@@ -3,9 +3,11 @@ import tkinter as tk
 from tkinter import filedialog, messagebox
 from tkinter import ttk
 from tkinter import font as tkfont
+from tkinterdnd2 import DND_FILES, TkinterDnD
 import csv
 import os
 import re
+from tkinter import simpledialog
 
 try:
     import pandas as pd
@@ -27,6 +29,8 @@ class TableWidget(tk.Frame):
         self.headers = []
         self.visible_columns = []
         self.filtered_indices = []
+        self.last_search_term = ""
+        self.last_search_index = -1
         self.undo_stack = []
         self.file_path = None
         self.comparison_window = None
@@ -42,7 +46,15 @@ class TableWidget(tk.Frame):
         tk.Button(toolbar, text="Charger", command=self.load_file, **btn_style).pack(side='left', padx=2)
         tk.Button(toolbar, text="Enregistrer", command=self.save_file, **btn_style).pack(side='left', padx=2)
         tk.Button(toolbar, text="Colonnes", command=self.select_columns, **btn_style).pack(side='left', padx=2)
+        tk.Button(toolbar, text="🔍 Rechercher", command=self.search_content, bg="white", relief="flat").pack(side='right', padx=2)
+        tk.Button(toolbar, text="✏️ Remplacer", command=self.replace_content, bg="white", relief="flat").pack(side='right', padx=2)
         
+        # === (AJOUT) Bouton UNDO (Annuler) pour la sécurité ===
+        tk.Button(toolbar, text="↩️ Annuler", command=self.undo_last_action, bg="white", relief="flat", fg="red").pack(side='right', padx=5)
+
+        # Raccourci clavier
+        self.bind_all("<Control-h>", lambda e: self.replace_content())
+
         # --- Treeview ---
         self.tree_frame = tk.Frame(self)
         self.tree_frame.pack(fill='both', expand=True)
@@ -71,7 +83,105 @@ class TableWidget(tk.Frame):
         # État pour la recherche "Suivant"
         self.last_search_index = -1
 
+    def save_state(self):
+        """Sauvegarde l'état actuel des données pour le CTRL+Z"""
+        # On garde une copie profonde des données
+        import copy
+        state = copy.deepcopy(self.data)
+        self.undo_stack.append(state)
+        # On limite la pile à 10 retours en arrière pour ne pas saturer la mémoire
+        if len(self.undo_stack) > 10:
+            self.undo_stack.pop(0)
+
+    def undo_last_action(self):
+        """Annule la dernière modification"""
+        if not self.undo_stack:
+            messagebox.showinfo("Undo", "Rien à annuler.", parent=self)
+            return
+            
+        # On récupère l'état précédent
+        last_data = self.undo_stack.pop()
+        self.data = last_data
+        
+        # On rafraichit
+        self.filtered_indices = list(range(len(self.data)))
+        self.refresh_tree()
+        messagebox.showinfo("Undo", "Action annulée avec succès.", parent=self)
+
+    def replace_content(self):
+        """
+        Ouvre une fenêtre de dialogue pour Rechercher / Remplacer
+        """
+        if not self.data:
+            return
+
+        # 1. Création de la fenêtre de dialogue personnalisée
+        top = tk.Toplevel(self)
+        top.title("Rechercher et Remplacer")
+        top.geometry("400x200")
+        top.transient(self) # Reste au dessus de la fenêtre parente
+        top.grab_set()      # Bloque les autres fenêtres tant que celle-ci est ouverte
+        
+        # Centrage (optionnel, pour faire propre)
+        try:
+            x = self.winfo_rootx() + 50
+            y = self.winfo_rooty() + 50
+            top.geometry(f"+{x}+{y}")
+        except: pass
+
+        # Champs de saisie
+        tk.Label(top, text="Rechercher :").pack(pady=(10, 0))
+        entry_find = tk.Entry(top, width=40)
+        entry_find.pack(pady=5)
+        entry_find.focus_set()
+
+        tk.Label(top, text="Remplacer par :").pack(pady=(10, 0))
+        entry_replace = tk.Entry(top, width=40)
+        entry_replace.pack(pady=5)
+
+        # Si on avait fait une recherche avant, on pré-remplit le champ "Find"
+        if hasattr(self, 'last_search_term') and self.last_search_term:
+            entry_find.insert(0, self.last_search_term)
+
+        # --- LOGIQUE DU REMPLACEMENT ---
+        def do_replace():
+            txt_find = entry_find.get()
+            txt_replace = entry_replace.get()
+            
+            if not txt_find:
+                messagebox.showwarning("Attention", "Le champ 'Rechercher' est vide.", parent=top)
+                return
+            
+            # Sauvegarde pour le Undo
+            self.save_state()
+            
+            count = 0
+            # On parcourt TOUT le tableau
+            for row_idx, row in enumerate(self.data):
+                for col_idx, cell_val in enumerate(row):
+                    val_str = str(cell_val)
+                    if txt_find in val_str:
+                        # Remplacement
+                        new_val = val_str.replace(txt_find, txt_replace)
+                        self.data[row_idx][col_idx] = new_val
+                        count += 1
+            
+            if count > 0:
+                self.refresh_tree()
+                messagebox.showinfo("Succès", f"{count} occurrences remplacées.", parent=top)
+                top.destroy()
+            else:
+                messagebox.showinfo("Info", "Aucune occurrence trouvée.", parent=top)
+
+        # Bouton Action
+        btn_frame = tk.Frame(top)
+        btn_frame.pack(fill='x', pady=20)
+        
+        tk.Button(btn_frame, text="Remplacer Tout", command=do_replace, 
+                  bg=self.accent_color, fg="white", font=("Segoe UI", 10, "bold")).pack()
+        
     def load_file(self):
+        """Méthode appelée par le bouton 'Charger' (Ouvre le dialogue)."""
         filetypes = [
             ("Tous supportés", "*.dat *.csv *.xlsx *.xls"),
             ("Fichiers DAT", "*.dat"),
@@ -79,11 +189,13 @@ class TableWidget(tk.Frame):
             ("Fichiers Excel", "*.xlsx *.xls")
         ]
         path = filedialog.askopenfilename(parent=self, filetypes=filetypes)
-        if not path:
-            return
-            
+        if path:
+            self.load_from_path(path)
+
+    def load_from_path(self, path):
+        """Méthode appelée par le Drag & Drop (Charge directement)."""
         self.file_path = path
-        filename = os.path.basename(path).lower() # On récupère le nom du fichier en minuscule
+        filename = os.path.basename(path).lower()
         ext = os.path.splitext(path)[1].lower()
         
         try:
@@ -93,12 +205,13 @@ class TableWidget(tk.Frame):
             # --- Lecture du fichier (Excel ou CSV/DAT) ---
             if ext in ['.xlsx', '.xls']:
                 if pd is None:
-                    messagebox.showerror("Erreur", "Pandas n'est pas installé. Impossible d'ouvrir Excel.", parent=self)
+                    messagebox.showerror("Erreur", "Pandas n'est pas installé.", parent=self)
                     return
                 df = pd.read_excel(path, dtype=str).fillna("")
                 self.headers = list(df.columns)
                 self.data = df.values.tolist()
             else:
+                # Lecture CSV/DAT
                 with open(path, 'r', encoding='latin-1', errors='replace') as f:
                     reader = csv.reader(f, delimiter=';') 
                     try:
@@ -112,76 +225,129 @@ class TableWidget(tk.Frame):
                     except:
                         f.seek(0)
                         reader = csv.reader(f, delimiter=';')
-
                     self.data = list(reader)
 
-            # --- DÉTECTION AUTOMATIQUE DES HEADERS ---
-            # On vérifie si le nom du fichier contient un mot clé connu (varexp, comm, event, etc.)
-            # Et on va chercher la constante correspondante dans la classe DatEditor
+            # --- DÉTECTION HEADERS (Logique existante conservée) ---
+            # (Je reprends votre logique exacte ici pour ne rien casser)
             detected_headers = []
-            
-            # Mapping entre mot-clé dans le fichier et nom de la variable dans DatEditor
             header_map = {
-                "varexp": "VAREXP_DEFAULT_HEADERS",
-                "event": "EVENT_DEFAULT_HEADERS",
-                "comm": "COMM_DEFAULT_HEADERS",
-                "vartreat": "VARTREAT_DEFAULT_HEADERS",
-                "exprv": "EXPRV_DEFAULT_HEADERS",
-                "cyclic": "CYCLIC_DEFAULT_HEADERS"
+                "varexp": "VAREXP_DEFAULT_HEADERS", "event": "EVENT_DEFAULT_HEADERS",
+                "comm": "COMM_DEFAULT_HEADERS", "vartreat": "VARTREAT_DEFAULT_HEADERS",
+                "exprv": "EXPRV_DEFAULT_HEADERS", "cyclic": "CYCLIC_DEFAULT_HEADERS"
             }
-
+            # Note : DatEditor doit être accessible ici
             for key, attr_name in header_map.items():
                 if key in filename:
-                    # On essaie de récupérer la liste depuis la classe DatEditor
-                    # (On utilise getattr pour éviter que ça plante si DatEditor n'est pas encore défini ou si l'attribut manque)
-                    try:
-                        detected_headers = getattr(DatEditor, attr_name, [])
-                    except NameError:
-                        pass # DatEditor pas encore défini ? Peu probable au runtime.
+                    try: detected_headers = getattr(DatEditor, attr_name, [])
+                    except: pass
                     break
             
-            # Si on a trouvé des headers spécifiques et que le fichier n'est pas un Excel (qui a ses propres headers)
             if detected_headers and ext not in ['.xlsx', '.xls']:
                 self.headers = detected_headers.copy()
-            
-            # --- Ajustement des données aux headers ---
-            if self.data:
-                # Si on a défini des headers (automatiques ou Excel), on s'assure que les lignes font la bonne taille
-                if self.headers:
-                    target_len = len(self.headers)
-                    # Si les headers auto sont plus longs que les données, on étend les données
-                    # Si les données sont plus longues, on étend les headers (cas générique)
-                    max_data_len = max(len(row) for row in self.data)
-                    
-                    final_len = max(target_len, max_data_len)
-                    
-                    # Si les données dépassent les headers prévus, on complète les headers
-                    if final_len > len(self.headers):
-                         for i in range(len(self.headers), final_len):
-                             self.headers.append(f"Col_{i+1}")
-                    
-                    # On pad les données
-                    for row in self.data:
-                        if len(row) < final_len:
-                            row.extend([""] * (final_len - len(row)))
-                            
-                else:
-                    # Cas générique sans headers détectés
-                    max_cols = max(len(row) for row in self.data)
-                    for row in self.data:
-                        if len(row) < max_cols:
-                            row.extend([""] * (max_cols - len(row)))
-                    self.headers = [f"Col_{i+1}" for i in range(max_cols)]
-            else:
-                 if not self.headers: self.headers = []
 
+            # Ajustement des colonnes (Pad)
+            if self.data:
+                max_cols = max(len(row) for row in self.data)
+                target_len = len(self.headers) if self.headers else max_cols
+                final_len = max(target_len, max_cols)
+                
+                if final_len > len(self.headers):
+                    for i in range(len(self.headers), final_len):
+                        self.headers.append(f"Col_{i+1}")
+                
+                for row in self.data:
+                    if len(row) < final_len:
+                        row.extend([""] * (final_len - len(row)))
+            else:
+                if not self.headers: self.headers = []
+
+            # Finalisation
             self.visible_columns = self.headers.copy()
             self.filtered_indices = list(range(len(self.data)))
             self.refresh_tree()
             self.last_search_index = -1
             
+            # Petit feedback visuel (titre de la toolbar)
+            for widget in self.winfo_children():
+                if isinstance(widget, tk.Frame): # La toolbar
+                    for child in widget.winfo_children():
+                        if isinstance(child, tk.Label):
+                            child.config(text=f"Fichier : {filename}")
+                            break
+                    break
+
         except Exception as e:
             messagebox.showerror("Erreur", f"Erreur lors du chargement : {e}", parent=self)
+
+    def search_content(self):
+        """
+        Effectue une recherche textuelle dans le tableau affiché.
+        Gère le 'Rechercher Suivant' si on relance la même recherche.
+        """
+        if not self.data:
+            return
+
+        # 1. Demander le texte à chercher (pré-rempli avec la dernière recherche)
+        term = simpledialog.askstring("Recherche", "Texte à trouver :", 
+                                      parent=self, 
+                                      initialvalue=self.last_search_term)
+        
+        if not term:
+            return # Annulé
+            
+        term_lower = term.lower()
+        
+        # Reset de l'index si on change de terme
+        if term != self.last_search_term:
+            self.last_search_index = -1
+            self.last_search_term = term
+
+        # 2. Définir où commencer (après le dernier trouvé ou au début)
+        start_idx = self.last_search_index + 1
+        
+        # On travaille sur filtered_indices pour ne chercher que dans ce qui est VISIBLE (si filtres actifs)
+        indices_to_check = self.filtered_indices
+        found = False
+        
+        # 3. Boucle de recherche
+        for i in range(start_idx, len(indices_to_check)):
+            real_row_idx = indices_to_check[i]
+            row_data = self.data[real_row_idx]
+            
+            # On cherche dans chaque colonne de la ligne
+            is_match = False
+            for cell in row_data:
+                if term_lower in str(cell).lower():
+                    is_match = True
+                    break
+            
+            if is_match:
+                # TROUVÉ !
+                self.last_search_index = i
+                
+                # A. Sélectionner la ligne dans le Treeview
+                # Les items du Treeview sont souvent nommés par leur index (ex: '0', '1', '150')
+                # Ou si ce sont des IIDs auto-générés, il faut les récupérer via get_children()
+                children = self.tree.get_children()
+                
+                if i < len(children):
+                    item_id = children[i]
+                    self.tree.selection_set(item_id) # Surligne en bleu
+                    self.tree.focus(item_id)         # Focus
+                    self.tree.see(item_id)           # Scroll jusqu'à la ligne
+                
+                found = True
+                break
+        
+        # 4. Gestion "Non trouvé" ou "Fin de fichier"
+        if not found:
+            if start_idx > 0:
+                # On était déjà en train de chercher, on propose de recommencer au début
+                if messagebox.askyesno("Recherche", "Fin du tableau atteinte.\nReprendre au début ?", parent=self):
+                    self.last_search_index = -1
+                    self.search_content() # Appel récursif immédiat pour relancer du début
+            else:
+                messagebox.showinfo("Recherche", f"Aucune occurrence de '{term}' trouvée.", parent=self)
 
     def save_file(self):
         if not self.data:
@@ -1028,13 +1194,30 @@ class DatEditor:
         # ---- Contenu Principal (Droite) ----
         content_frame = tk.Frame(main_frame, bg=self.COLORS["bg_light"])
         content_frame.pack(side='left', fill='both', expand=True, padx=20, pady=20)
-    
+        
         # ---- Boutons Sidebar (Utilisation d'une méthode helper pour le style) ----
         self.buttons = {}
         
         # Groupe Fichiers
         self._add_nav_label(nav_content, "Fichiers")
-        self.buttons['folder'] = self._create_nav_button(nav_content, "Choisir dossier", self.select_folder)
+        # 1. Sous-conteneur pour la ligne de saisie dans la barre latérale
+        folder_frame = tk.Frame(nav_content, bg=self.COLORS["bg_dark"])
+        folder_frame.pack(fill='x', pady=(0, 5))
+        
+        # 2. Champ de saisie
+        self.path_entry = tk.Entry(folder_frame, bg=self.COLORS["bg_light"], fg=self.COLORS["text_dark"])
+        self.path_entry.pack(side='left', fill='x', expand=True, padx=(0, 5))
+        
+        # 3. Bouton "..." (Explorateur)
+        btn_browse = tk.Button(folder_frame, text="...", command=self.browse_folder, 
+                               bg=self.COLORS["accent"], fg="white", relief="flat")
+        btn_browse.pack(side='left', padx=(0, 5))
+        
+        # 4. Bouton "Charger" (Action réelle)
+        btn_load = tk.Button(folder_frame, text="OK", command=self.load_from_entry, 
+                             bg=self.COLORS["success"], fg="white", relief="flat")
+        btn_load.pack(side='left')
+        # ---------------------------------------------------
         self.buttons['open_any'] = self._create_nav_button(nav_content, "Ouvrir autre .DAT", self.open_any_dat_file)
         self.buttons['save'] = self._create_nav_button(nav_content, "Enregistrer sous...", self.save_file, bg_color=self.COLORS["success"])
         
@@ -1139,7 +1322,7 @@ class DatEditor:
         self.buttons['search'] = create_tool_button(tools_inner, "Rechercher", self.open_search_replace)
         self.buttons['top'] = create_tool_button(tools_inner, "▲ Haut", self.scroll_top, color="#95a5a6")
         self.buttons['bottom'] = create_tool_button(tools_inner, "▼ Bas", self.scroll_bottom, color="#95a5a6")
-        self.buttons['compare'] = create_tool_button(tools_inner, "Comparaison", self.open_comparison, color="#8e44ad")
+        self.buttons['compare'] = create_tool_button(tools_inner, "Comparaison", self.open_compare_window, color="#8e44ad")
 
     
         # ---- Table + Scrollbars ----
@@ -1253,43 +1436,115 @@ class DatEditor:
         for idx, row in enumerate(self.data):
             iid = str(idx)
             self.cell_templates[iid] = {col: row[self.headers.index(col)] for col in self.visible_columns if col in self.headers}
-
-    def open_comparison(self):
-        # 1. Sécurité : On vérifie si la variable existe, sinon on la crée
-        if not hasattr(self, 'comparison_window'):
-            self.comparison_window = None
-
-        # 2. Si la fenêtre semble ouverte, on essaie de la mettre au premier plan
-        if self.comparison_window is not None:
-            try:
-                if self.comparison_window.winfo_exists():
-                    self.comparison_window.lift()
-                    self.comparison_window.focus_force()
-                    return
-                else:
-                    # Elle n'existe plus (fermée sauvagement), on réinitialise
-                    self.comparison_window = None
-            except Exception:
-                self.comparison_window = None
-
-        # 3. Création de la nouvelle fenêtre
+    
+    def browse_folder(self):
+        """
+        Ouvre l'explorateur en forçant le démarrage à un endroit précis.
+        """
         try:
-            self.comparison_window = ComparisonWindow(self.root)
+            # On définit le dossier de départ ici
+            # Vous pouvez mettre "C:/" ou "C:/MonDossier/Projet"
+            dossier_depart = "C:/" 
             
-            # Gestion propre de la fermeture (croix rouge)
-            def on_close():
-                try:
-                    self.comparison_window.destroy()
-                except:
-                    pass
-                self.comparison_window = None 
+            # Si le champ texte contient déjà un chemin valide, on l'utilise plutôt que C:/
+            # (Optionnel : supprimez ces 3 lignes si vous voulez FORCER C:/ à chaque fois)
+            current_path = self.path_entry.get().strip()
+            if current_path and os.path.exists(current_path):
+                dossier_depart = current_path
 
-            self.comparison_window.protocol("WM_DELETE_WINDOW", on_close)
+            # Appel de la fenêtre avec initialdir
+            folder_selected = filedialog.askdirectory(initialdir=dossier_depart)
             
-        except NameError:
-            messagebox.showerror("Erreur", "La classe 'ComparisonWindow' est introuvable.\nVérifiez qu'elle est bien collée AVANT la classe DatEditor.")
+            if folder_selected:
+                self.path_entry.delete(0, tk.END)
+                self.path_entry.insert(0, folder_selected)
+                
         except Exception as e:
-            messagebox.showerror("Erreur", f"Impossible d'ouvrir la fenêtre : {e}")
+            messagebox.showerror("Erreur Explorateur", 
+                f"L'explorateur a rencontré un problème.\nErreur: {e}")
+
+    def load_from_entry(self):
+        """Lit le chemin manuel et lance le chargement du dossier."""
+        path = self.path_entry.get().strip()
+        
+        # On enlève les éventuels guillemets (si l'utilisateur fait un copier-coller depuis Windows)
+        if path.startswith('"') and path.endswith('"'):
+            path = path[1:-1]
+            
+        if not path:
+            messagebox.showwarning("Attention", "Veuillez entrer ou sélectionner un chemin de dossier.")
+            return
+            
+        if not os.path.exists(path):
+            messagebox.showerror("Erreur", f"Le chemin spécifié n'existe pas ou est inaccessible :\n{path}")
+            return
+            
+        # On enregistre le chemin dans la variable que votre programme utilise déjà
+        self.selected_folder = path
+        
+        # On met à jour l'interface si nécessaire
+        self.root.title(f"Éditeur .DAT - {self.selected_folder}")
+        
+        # On appelle la fonction de chargement Varexp par défaut (ou un message de succès)
+        messagebox.showinfo("Dossier validé", "Le dossier est défini. Cliquez maintenant sur 'Varexp' ou un autre module.")
+        # Optionnel : décommenter la ligne ci-dessous si vous voulez charger automatiquement un module
+        # self.load_varexp()
+
+    def open_compare_window(self):
+        """
+        Ouvre une fenêtre avec deux TableWidgets côte à côte (Split View)
+        supportant le Drag & Drop de fichiers .xlsx, .csv, .dat.
+        """
+        # 1. Création de la fenêtre
+        comp_win = tk.Toplevel(self.root)
+        comp_win.title("Comparateur Universel (Excel, CSV, DAT)")
+        comp_win.geometry("1600x900")
+        
+        # 2. Utilisation d'un PanedWindow pour redimensionner gauche/droite
+        paned = tk.PanedWindow(comp_win, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=4)
+        paned.pack(fill="both", expand=True)
+        
+        # --- WIDGET GAUCHE ---
+        # On crée un conteneur pour gérer le Drop
+        frame_left = tk.Frame(paned)
+        paned.add(frame_left, minsize=400)
+        
+        # Instance du tableau
+        table_left = TableWidget(frame_left, title="Fichier Gauche (Glissez ici)", accent_color="#2980b9")
+        table_left.pack(fill="both", expand=True)
+        
+        # --- WIDGET DROITE ---
+        frame_right = tk.Frame(paned)
+        paned.add(frame_right, minsize=400)
+        
+        # Instance du tableau
+        table_right = TableWidget(frame_right, title="Fichier Droite (Glissez ici)", accent_color="#d35400")
+        table_right.pack(fill="both", expand=True)
+        
+        # 3. GESTION DU DRAG & DROP
+        
+        def clean_path(event_data):
+            # Nettoyage des accolades {chemin} que Windows ajoute parfois
+            path = event_data
+            if path.startswith('{') and path.endswith('}'):
+                path = path[1:-1]
+            return path
+
+        def drop_left(event):
+            path = clean_path(event.data)
+            # On appelle la nouvelle méthode créée à l'étape 1
+            table_left.load_from_path(path)
+
+        def drop_right(event):
+            path = clean_path(event.data)
+            table_right.load_from_path(path)
+
+        # Activation DND sur les frames conteneurs
+        frame_left.drop_target_register(DND_FILES)
+        frame_left.dnd_bind('<<Drop>>', drop_left)
+        
+        frame_right.drop_target_register(DND_FILES)
+        frame_right.dnd_bind('<<Drop>>', drop_right)
         
     # =========================================================================
     #  DATEDITOR (PRINCIPAL) - MENU, INSERTION & UNDO
@@ -3663,6 +3918,6 @@ class DatEditor:
 
 
 if __name__ == "__main__":
-    root = tk.Tk()
+    root = TkinterDnD.Tk()
     DatEditor(root)
     root.mainloop()
