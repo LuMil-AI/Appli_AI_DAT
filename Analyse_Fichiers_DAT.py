@@ -1178,8 +1178,8 @@ class DatEditor:
         "REG": "Registre analogique",
         "CTV": "Registre analogique commandable",
         "TXT": "Texte",
-        "CXT": "Texte commandable"
-        #"CHR": "Chronomètre"
+        "CXT": "Texte commandable",
+        "CHR": "Chronomètre"
     }
 
 
