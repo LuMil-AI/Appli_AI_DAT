@@ -1264,7 +1264,13 @@ class DatEditor:
         # ---------------------------------------------------
         self.buttons['open_any'] = self._create_nav_button(nav_content, "Ouvrir autre .DAT", self.open_any_dat_file)
         self.buttons['save'] = self._create_nav_button(nav_content, "Enregistrer sous...", self.save_file, bg_color=self.COLORS["success"])
-        
+        self.buttons['global_search'] = self._create_nav_button(
+            nav_content, 
+            "Recherche Globale", 
+            self.open_global_search_window, 
+            bg_color="#8e44ad" # Violet pour distinguer
+        )
+
         self._add_nav_separator(nav_content)
         
         # Groupe Modules
@@ -1629,6 +1635,227 @@ class DatEditor:
         frame_right.drop_target_register(DND_FILES)
         frame_right.dnd_bind('<<Drop>>', drop_right)
         
+    def load_file_direct(self, file_path):
+        """
+        Charge un fichier depuis la recherche globale.
+        Modifié : Ne considère PAS la 1ère ligne comme header, génère Col_1, Col_2...
+        """
+        try:
+            self.selected_folder = os.path.dirname(file_path)
+            filename = os.path.basename(file_path)
+            
+            self.data = []
+            self.headers = []
+            
+            # 1. Lecture du fichier (CSV/DAT)
+            with open(file_path, 'r', encoding='latin-1', errors='replace') as f:
+                # Détection automatique du séparateur (; ou ,)
+                sample = f.read(1024)
+                f.seek(0)
+                delimiter = ';' 
+                if ',' in sample and ';' not in sample:
+                    delimiter = ','
+                
+                reader = csv.reader(f, delimiter=delimiter)
+                self.data = list(reader)
+
+            # 2. Génération des Headers (Col_1, Col_2...)
+            if self.data:
+                # On calcule le nombre max de colonnes
+                max_cols = max(len(row) for row in self.data)
+                
+                # On génère les titres : Col_1, Col_2, etc.
+                self.headers = [f"Col_{i+1}" for i in range(max_cols)]
+                
+                # 3. Padding : On s'assure que toutes les lignes ont la même longueur
+                # (Sinon le Treeview peut planter ou décaler l'affichage)
+                for row in self.data:
+                    if len(row) < max_cols:
+                        row.extend([""] * (max_cols - len(row)))
+            else:
+                self.headers = [] # Fichier vide
+            
+            # 4. Rafraichissement de l'interface
+            self.visible_columns = self.headers
+            self.filtered_indices = list(range(len(self.data)))
+            self.refresh_tree()
+            
+            # Mise à jour du titre et info
+            self.root.title(f"Éditeur .DAT - {filename}")
+            
+            # On réinitialise les variables d'édition
+            self.last_search_index = -1
+            self.modified = False
+            
+            # Petit focus pour montrer que c'est chargé
+            messagebox.showinfo("Fichier chargé", f"Le fichier '{filename}' a été ouvert avec succès.")
+            
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Impossible d'ouvrir le fichier :\n{e}")
+
+    def open_global_search_window(self):
+        """
+        Ouvre une fenêtre pour rechercher une chaîne de caractères dans TOUT le projet.
+        (Le projet est défini comme le dossier parent du dossier sélectionné).
+        """
+        # 1. Détermination du dossier racine du projet
+        if not self.selected_folder:
+            messagebox.showwarning("Attention", "Veuillez d'abord charger un dossier ou un fichier pour définir le contexte du projet.")
+            return
+
+        # On remonte d'un cran (Dossier parent)
+        project_root = os.path.dirname(self.selected_folder)
+        
+        # Fenêtre de recherche
+        search_win = tk.Toplevel(self.root)
+        search_win.title(f"Recherche Globale - Racine : {os.path.basename(project_root)}")
+        search_win.geometry("800x600")
+        search_win.configure(bg=self.COLORS["bg_light"])
+
+        # --- Zone de saisie ---
+        top_frame = tk.Frame(search_win, bg=self.COLORS["bg_light"], pady=10, padx=10)
+        top_frame.pack(fill="x")
+
+        tk.Label(top_frame, text="Texte à rechercher :", bg=self.COLORS["bg_light"]).pack(side="left")
+        entry_search = tk.Entry(top_frame, width=40)
+        entry_search.pack(side="left", padx=10)
+        entry_search.focus_set()
+
+        # --- Arbre des résultats ---
+        tree_frame = tk.Frame(search_win)
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # On ajoute une colonne "Chemin" cachée pour stocker le chemin complet
+        columns = ("Fichier", "Chemin")
+        result_tree = ttk.Treeview(tree_frame, columns=columns, show="tree headings")
+        result_tree.heading("#0", text="Arborescence / Fichiers")
+        result_tree.heading("Fichier", text="Nom")
+        result_tree.column("Fichier", width=200)
+        # On cache la colonne chemin, elle sert juste aux données
+        result_tree.column("Chemin", width=0, stretch=False) 
+        
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=result_tree.yview)
+        result_tree.configure(yscrollcommand=vsb.set)
+        
+        result_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+
+        # Barre de statut / progression
+        lbl_status = tk.Label(search_win, text="Prêt.", bg="white", anchor="w", relief="sunken")
+        lbl_status.pack(fill="x")
+
+        # === LOGIQUE DE RECHERCHE ===
+        import threading
+
+        def run_search():
+            target = entry_search.get().strip()
+            if not target: return
+
+            btn_search.config(state="disabled", text="Recherche en cours...")
+            result_tree.delete(*result_tree.get_children())
+            
+            # Extensions à scanner (pour éviter les .exe, .dll, images...)
+            valid_extensions = {'.dat', '.txt', '.csv', '.xml', '.ini', '.cfg', '.py', '.log'}
+            
+            # Structure pour stocker l'arborescence : { "DossierA": ["Fichier1", "Fichier2"], ... }
+            matches_found = 0
+            
+            # Fonction lancée dans un thread
+            def worker():
+                nonlocal matches_found
+                
+                # On parcourt récursivement
+                for root, dirs, files in os.walk(project_root):
+                    
+                    # Filtre optionnel : ignorer les dossiers cachés (.git, etc)
+                    if '.git' in root or '__pycache__' in root:
+                        continue
+                        
+                    for file in files:
+                        ext = os.path.splitext(file)[1].lower()
+                        if ext in valid_extensions:
+                            full_path = os.path.join(root, file)
+                            
+                            try:
+                                # Lecture sécurisée
+                                with open(full_path, 'r', encoding='latin-1', errors='ignore') as f:
+                                    content = f.read()
+                                    if target in content: # MATCH !
+                                        # On insère dans le Treeview via after() car on est dans un thread
+                                        search_win.after(0, lambda p=full_path, r=root: insert_match(p, r))
+                                        matches_found += 1
+                                        # Mise à jour statut légère
+                                        if matches_found % 5 == 0:
+                                             search_win.after(0, lambda c=matches_found: lbl_status.config(text=f"Trouvé {c} fichiers..."))
+                            except:
+                                pass # Fichier illisible
+                
+                # Fin du thread
+                search_win.after(0, finish_search)
+
+            # Helpers pour l'interface
+            folder_nodes = {} # Pour ne pas recréer les dossiers parents 50 fois
+
+            def insert_match(full_path, root_dir):
+                filename = os.path.basename(full_path)
+                rel_dir = os.path.relpath(root_dir, project_root)
+                
+                # Gestion de l'affichage en arbre
+                parent_node = ""
+                
+                if rel_dir == ".":
+                    parent_node = "" # Racine
+                else:
+                    # On crée les dossiers intermédiaires si besoin
+                    parts = rel_dir.split(os.sep)
+                    current_path = ""
+                    for part in parts:
+                        prev_path = current_path
+                        current_path = os.path.join(current_path, part) if current_path else part
+                        
+                        if current_path not in folder_nodes:
+                            # Création du dossier visuel
+                            node_id = result_tree.insert(folder_nodes.get(prev_path, ""), "end", text=part, open=True, image="") # Ajouter icone dossier si dispo
+                            folder_nodes[current_path] = node_id
+                    
+                    parent_node = folder_nodes[rel_dir]
+
+                # Insertion du FICHIER
+                # On stocke le chemin complet dans la colonne 'Chemin' (index 1)
+                result_tree.insert(parent_node, "end", text=filename, values=("", full_path))
+
+            def finish_search():
+                btn_search.config(state="normal", text="Rechercher")
+                lbl_status.config(text=f"Terminé. {matches_found} fichiers trouvés contenant '{target}'.")
+                if matches_found == 0:
+                    messagebox.showinfo("Résultat", "Aucun fichier ne contient cette chaîne.")
+
+            # Lancement du thread
+            threading.Thread(target=worker, daemon=True).start()
+
+        btn_search = tk.Button(top_frame, text="Rechercher", command=run_search, bg=self.COLORS["accent"], fg="white")
+        btn_search.pack(side="left")
+        
+        # Bind Entrée
+        entry_search.bind("<Return>", lambda e: run_search())
+
+        # === DOUBLE CLIC POUR OUVRIR ===
+        def on_double_click(event):
+            item_id = result_tree.selection()[0]
+            item_values = result_tree.item(item_id, "values")
+            
+            # Si c'est un dossier, values est vide ou partiel selon implémentation,
+            # mais ici nos fichiers ont le chemin dans la colonne #2 (index 1)
+            if item_values and len(item_values) > 1:
+                full_path = item_values[1] # C'est le chemin caché
+                if full_path and os.path.isfile(full_path):
+                    # Ouverture dans l'appli principale
+                    self.load_file_direct(full_path)
+                    # Optionnel : fermer la recherche ? 
+                    # search_win.destroy() 
+
+        result_tree.bind("<Double-1>", on_double_click)
+
     # =========================================================================
     #  DATEDITOR (PRINCIPAL) - MENU, INSERTION & UNDO
     # =========================================================================
