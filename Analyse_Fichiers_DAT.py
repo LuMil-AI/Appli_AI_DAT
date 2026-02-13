@@ -1262,9 +1262,15 @@ class DatEditor:
                              bg=self.COLORS["success"], fg="white", relief="flat")
         btn_load.pack(side='left')
         # ---------------------------------------------------
-        self.buttons['open_any'] = self._create_nav_button(nav_content, "Ouvrir autre .DAT", self.open_any_dat_file)
+        self.buttons['open_any'] = self._create_nav_button(nav_content, "Ouvrir autre fichier", self.open_any_dat_file)
         self.buttons['save'] = self._create_nav_button(nav_content, "Enregistrer sous...", self.save_file, bg_color=self.COLORS["success"])
-        
+        self.buttons['global_search'] = self._create_nav_button(
+            nav_content, 
+            "Recherche Globale", 
+            self.open_global_search_window, 
+            bg_color="#8e44ad" # Violet pour distinguer
+        )
+
         self._add_nav_separator(nav_content)
         
         # Groupe Modules
@@ -1629,6 +1635,412 @@ class DatEditor:
         frame_right.drop_target_register(DND_FILES)
         frame_right.dnd_bind('<<Drop>>', drop_right)
         
+    def open_text_viewer(self, file_path, target_line=None):
+        """
+        Ouvre un Éditeur de texte simple pour les fichiers non-tabulaires (.py, .txt, .ini...).
+        Permet la modification et l'enregistrement.
+        """
+        filename = os.path.basename(file_path)
+        
+        # Création fenêtre
+        viewer = tk.Toplevel(self.root)
+        viewer.title(f"Éditeur Rapide - {filename}")
+        viewer.geometry("1000x700")
+        
+        # --- BARRE D'OUTILS ---
+        toolbar = tk.Frame(viewer, bg="#ecf0f1", pady=5, padx=5)
+        toolbar.pack(fill="x", side="top")
+        
+        # Fonction de sauvegarde interne
+        def save_changes(event=None):
+            try:
+                # "1.0" = début, "end-1c" = fin sans le saut de ligne automatique ajouté par Tkinter
+                content = txt_area.get("1.0", "end-1c")
+                
+                # On écrit en latin-1 pour rester cohérent avec la lecture (ou utf-8 selon vos besoins)
+                with open(file_path, "w", encoding="latin-1") as f:
+                    f.write(content)
+                
+                messagebox.showinfo("Succès", f"Fichier '{filename}' enregistré !", parent=viewer)
+                return "break" # Pour empêcher d'autres events si appelé via Ctrl+S
+            except Exception as e:
+                messagebox.showerror("Erreur", f"Impossible d'enregistrer :\n{e}", parent=viewer)
+
+        # Bouton Sauvegarder
+        btn_save = tk.Button(toolbar, text="💾 Enregistrer", command=save_changes, 
+                             bg=self.COLORS["success"], fg="white", font=("Segoe UI", 9, "bold"))
+        btn_save.pack(side="left", padx=5)
+
+        # Bouton Fermer
+        tk.Button(toolbar, text="Fermer", command=viewer.destroy, bg="#95a5a6", fg="white").pack(side="right", padx=5)
+        
+        # Label Info
+        lbl_path = tk.Label(toolbar, text=file_path, bg="#ecf0f1", fg="#7f8c8d", font=("Segoe UI", 8))
+        lbl_path.pack(side="left", padx=10)
+
+        # --- ZONE DE TEXTE ---
+        frame_txt = tk.Frame(viewer)
+        frame_txt.pack(fill="both", expand=True)
+        
+        # Widget Text (UNDO=True permet le Ctrl+Z !)
+        txt_area = tk.Text(frame_txt, wrap="none", font=("Consolas", 10), undo=True)
+        
+        # Scrollbars
+        vsb = ttk.Scrollbar(frame_txt, orient="vertical", command=txt_area.yview)
+        hsb = ttk.Scrollbar(frame_txt, orient="horizontal", command=txt_area.xview)
+        txt_area.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+        txt_area.pack(side="left", fill="both", expand=True)
+        
+        # Bind du raccourci Ctrl+S
+        viewer.bind("<Control-s>", save_changes)
+
+        # --- CHARGEMENT ---
+        try:
+            # Lecture en latin-1 (standard industrie) ou utf-8
+            with open(file_path, "r", encoding="latin-1", errors="ignore") as f:
+                content = f.read()
+                txt_area.insert("1.0", content)
+                
+            # NOTE : On ne met PLUS state="disabled" ici pour permettre l'édition
+            
+            # Gestion du focus sur la ligne trouvée (Recherche Globale)
+            if target_line:
+                idx = f"{target_line}.0"
+                
+                # Surlignage
+                txt_area.tag_add("highlight", idx, f"{target_line}.end")
+                txt_area.tag_config("highlight", background="yellow", foreground="black")
+                
+                # Scroll et Focus
+                txt_area.see(idx)
+                txt_area.mark_set("insert", idx) # Place le curseur au début de la ligne
+                txt_area.focus_set()
+                
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Impossible de lire le fichier :\n{e}", parent=viewer)
+            viewer.destroy()
+
+    def load_file_direct(self, file_path, target_line=None):
+        """
+        Charge un fichier depuis la recherche globale.
+        - Si .dat/.csv/.xlsx -> Ouvre dans le TABLEAU PRINCIPAL (avec colonne Ligne).
+        - Sinon -> Ouvre dans le TEXT VIEWER (nouvelle fenêtre).
+        """
+        ext = os.path.splitext(file_path)[1].lower()
+        
+        # Liste des fichiers à traiter comme des tableaux
+        # Note : On inclut .dat ici car votre appli est faite pour ça, 
+        # mais si vos .dat sont du texte pur sans ; vous pouvez le retirer de cette liste.
+        tabular_extensions = ['.csv', '.xlsx', '.xls', '.dat'] 
+        
+        if ext not in tabular_extensions:
+            # === CAS FICHIER TEXTE (.py, .txt, .ini...) ===
+            self.open_text_viewer(file_path, target_line)
+            return
+
+        # === CAS FICHIER TABLEAU (Code précédent) ===
+        try:
+            self.current_file_path = file_path
+            self.selected_folder = os.path.dirname(file_path)
+            filename = os.path.basename(file_path)
+            
+            self.data = []
+            self.headers = []
+            
+            # 1. Lecture
+            # Cas Excel spécial (si vous voulez supporter Excel dans la recherche globale)
+            if ext in ['.xlsx', '.xls'] and pd is not None:
+                df = pd.read_excel(file_path, dtype=str).fillna("")
+                self.headers = list(df.columns)
+                self.data = df.values.tolist()
+            else:
+                # Lecture CSV/DAT classique
+                with open(file_path, 'r', encoding='latin-1', errors='replace') as f:
+                    sample = f.read(1024)
+                    f.seek(0)
+                    delimiter = ';' 
+                    if ',' in sample and ';' not in sample: delimiter = ','
+                    reader = csv.reader(f, delimiter=delimiter)
+                    self.data = list(reader)
+
+            # 2. Gestion des colonnes
+            if self.data:
+                max_cols = max(len(row) for row in self.data)
+                
+                # Si c'est Excel, on a déjà des headers, sinon on génère Col_X
+                if not self.headers:
+                    self.headers = [f"Col_{i+1}" for i in range(max_cols)]
+                
+                # Padding
+                for row in self.data:
+                    if len(row) < len(self.headers): # Correction padding Excel
+                         row.extend([""] * (len(self.headers) - len(row)))
+                    elif len(row) > len(self.headers): # Cas CSV malformé
+                         while len(self.headers) < len(row): self.headers.append(f"Col_{len(self.headers)+1}")
+
+                # === AJOUT COLONNE "LIGNE" (Seulement pour recherche globale) ===
+                if target_line is not None:
+                    self.headers.insert(0, "Ligne")
+                    for i, row in enumerate(self.data):
+                        row.insert(0, str(i + 1))
+            else:
+                if not self.headers: self.headers = []
+
+            # 3. Affichage
+            self.visible_columns = self.headers
+            self.filtered_indices = list(range(len(self.data)))
+            self.refresh_tree()
+            
+            self.root.title(f"Éditeur - {filename}")
+            self.last_search_index = -1
+            self.modified = False
+            
+            # === SCROLL VERS LA CIBLE ===
+            if target_line is not None:
+                try:
+                    target_index = int(target_line) - 1
+                    children = self.tree.get_children()
+                    if 0 <= target_index < len(children):
+                        item_id = children[target_index]
+                        self.tree.see(item_id)
+                        self.tree.selection_set(item_id)
+                        self.tree.focus(item_id)
+                        self.status_var.set(f"Ligne {target_line} trouvée")
+                except: pass
+
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Impossible d'ouvrir le tableau :\n{e}")
+
+    def open_global_search_window(self):
+        """
+        Recherche Globale V3 (Blindée anti-crash).
+        Gère la fermeture de fenêtre pendant la recherche.
+        """
+        # 1. Détermination du dossier racine
+        if not self.selected_folder:
+            selected = filedialog.askdirectory(title="Choisir le dossier racine du projet")
+            if not selected: return
+            project_root = selected
+        else:
+            project_root = os.path.dirname(self.selected_folder)
+        
+        # Fenêtre
+        search_win = tk.Toplevel(self.root)
+        search_win.title(f"Recherche Avancée - Projet : {os.path.basename(project_root)}")
+        search_win.geometry("900x700")
+        search_win.configure(bg=self.COLORS["bg_light"])
+
+        # === DRAPEAU DE SÉCURITÉ ===
+        # Permet de savoir si l'utilisateur a demandé l'arrêt ou fermé la fenêtre
+        stop_search_flag = False
+
+        def on_close_window():
+            nonlocal stop_search_flag
+            stop_search_flag = True
+            search_win.destroy()
+
+        # On intercepte la croix rouge pour arrêter proprement le thread
+        search_win.protocol("WM_DELETE_WINDOW", on_close_window)
+
+        # --- Zone de saisie ---
+        top_frame = tk.Frame(search_win, bg=self.COLORS["bg_light"], pady=10, padx=10)
+        top_frame.pack(fill="x")
+
+        tk.Label(top_frame, text="Texte à trouver :", bg=self.COLORS["bg_light"], font=("Segoe UI", 10, "bold")).pack(side="left")
+        entry_search = tk.Entry(top_frame, width=40, font=("Segoe UI", 10))
+        entry_search.pack(side="left", padx=10)
+        entry_search.focus_set()
+
+        case_sensitive_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(top_frame, text="Respecter la casse", variable=case_sensitive_var, bg=self.COLORS["bg_light"]).pack(side="left", padx=10)
+
+        # --- Arbre des résultats ---
+        tree_frame = tk.Frame(search_win)
+        tree_frame.pack(fill="both", expand=True, padx=10, pady=5)
+
+        result_tree = ttk.Treeview(tree_frame, columns=("Ligne", "Apercu", "Chemin"), show="tree headings")
+        
+        result_tree.heading("#0", text="Fichiers")
+        result_tree.column("#0", width=300)
+        
+        result_tree.heading("Ligne", text="N° Ligne")
+        result_tree.column("Ligne", width=80, anchor="center")
+        
+        result_tree.heading("Apercu", text="Contenu")
+        result_tree.column("Apercu", width=400)
+        result_tree.column("Chemin", width=0, stretch=False) 
+        
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=result_tree.yview)
+        hsb = ttk.Scrollbar(tree_frame, orient="horizontal", command=result_tree.xview)
+        result_tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        result_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        hsb.pack(side="bottom", fill="x")
+
+        lbl_status = tk.Label(search_win, text="Prêt.", bg="white", anchor="w", relief="sunken")
+        lbl_status.pack(fill="x")
+
+        # === MOTEUR DE RECHERCHE (THREAD) ===
+        import threading
+
+        def run_search():
+            target = entry_search.get().strip()
+            if not target: return
+            
+            nonlocal stop_search_flag
+            stop_search_flag = False # On réactive en cas de nouvelle recherche
+
+            is_case_sensitive = case_sensitive_var.get()
+            target_check = target if is_case_sensitive else target.lower()
+
+            btn_search.config(state="disabled", text="Recherche...") 
+            result_tree.delete(*result_tree.get_children())
+            
+            ignored_ext = {'.exe', '.dll', '.png', '.jpg', '.pdf', '.zip', '.pyc'}
+            stats = {"files": 0, "matches": 0}
+            
+            def worker():
+                tree_nodes = {} 
+
+                for root, dirs, files in os.walk(project_root):
+                    # 1. Vérification de sécurité : Si fenêtre fermée, on STOPPE TOUT
+                    if stop_search_flag: 
+                        return
+
+                    if '.git' in root or '__pycache__' in root: continue
+
+                    for file in files:
+                        if stop_search_flag: return # Double check
+
+                        ext = os.path.splitext(file)[1].lower()
+                        if ext in ignored_ext: continue
+                        
+                        full_path = os.path.join(root, file)
+                        stats["files"] += 1
+                        
+                        try:
+                            matches_in_file = []
+                            with open(full_path, 'r', encoding='latin-1', errors='ignore') as f:
+                                for line_idx, line in enumerate(f, 1):
+                                    line_content = line if is_case_sensitive else line.lower()
+                                    if target_check in line_content:
+                                        snippet = line.strip()
+                                        if len(snippet) > 100: snippet = snippet[:100] + "..."
+                                        matches_in_file.append((line_idx, snippet))
+
+                            if matches_in_file:
+                                stats["matches"] += len(matches_in_file)
+                                # Appel sécurisé vers l'interface
+                                if not stop_search_flag:
+                                    search_win.after(0, lambda p=full_path, r=root, m=matches_in_file: insert_results(p, r, m))
+                                
+                        except Exception:
+                            continue
+
+                        # Update statut
+                        if stats["files"] % 50 == 0:
+                            if not stop_search_flag:
+                                search_win.after(0, lambda s=f"Scan: {stats['files']} fichiers...": update_status(s))
+
+                # Fin du scan
+                if not stop_search_flag:
+                    search_win.after(0, finish_search)
+
+            def update_status(text):
+                # Vérifie si la fenêtre existe encore avant de configurer le label
+                try:
+                    if search_win.winfo_exists():
+                        lbl_status.config(text=text)
+                except: pass
+
+            def insert_results(full_path, root_dir, matches):
+                # Vérification CRITIQUE avant d'écrire dans l'interface
+                try:
+                    if not search_win.winfo_exists() or stop_search_flag:
+                        return
+
+                    rel_dir = os.path.relpath(root_dir, project_root)
+                    parent_id = ""
+                    
+                    if rel_dir != ".":
+                        parts = rel_dir.split(os.sep)
+                        current_path = ""
+                        for part in parts:
+                            prev_path = current_path
+                            current_path = os.path.join(current_path, part) if current_path else part
+                            
+                            if current_path not in tree_nodes:
+                                # On doit aussi vérifier si le noeud parent existe encore
+                                p_node = tree_nodes.get(prev_path, "")
+                                try:
+                                    node = result_tree.insert(p_node, "end", text=part, open=True)
+                                    tree_nodes[current_path] = node
+                                except: return # Sécurité supplémentaire
+                        
+                        parent_id = tree_nodes.get(rel_dir, "")
+
+                    filename = os.path.basename(full_path)
+                    file_node = result_tree.insert(parent_id, "end", text=filename, values=("", f"({len(matches)} trouvés)", full_path), open=True)
+                    result_tree.item(file_node, tags=('file',))
+
+                    for line_num, snippet in matches:
+                        result_tree.insert(file_node, "end", text=f"Ligne {line_num}", values=(line_num, snippet, full_path), tags=('match',))
+                
+                except Exception:
+                    pass # Si ça plante ici, c'est que la fenêtre est en train de se fermer, on ignore.
+
+            def finish_search():
+                try:
+                    if search_win.winfo_exists():
+                        btn_search.config(state="normal", text="Rechercher")
+                        lbl_status.config(text=f"Terminé. {stats['matches']} résultats dans {stats['files']} fichiers.")
+                        if stats['matches'] == 0:
+                            messagebox.showinfo("Recherche", "Aucun résultat trouvé.")
+                except: pass
+
+            tree_nodes = {}
+            threading.Thread(target=worker, daemon=True).start()
+
+        # Bouton
+        btn_search = tk.Button(top_frame, text="Rechercher", command=run_search, bg=self.COLORS["accent"], fg="white")
+        btn_search.pack(side="left")
+        entry_search.bind("<Return>", lambda e: run_search())
+
+        result_tree.tag_configure('file', font=("Segoe UI", 9, "bold"), background="#ecf0f1")
+        result_tree.tag_configure('match', font=("Consolas", 9))
+
+        # === DANS open_global_search_window ===
+
+        def on_double_click(event):
+            try:
+                item_id = result_tree.selection()
+                if not item_id: return
+                item_id = item_id[0]
+                
+                # On récupère les valeurs de la ligne cliquée
+                vals = result_tree.item(item_id, "values")
+                # Structure vals : (NumLigne, Apercu, CheminComplet)
+                
+                if len(vals) >= 3:
+                    line_num = vals[0]    # Récupération du numéro de ligne
+                    full_path = vals[2]   # Récupération du chemin
+                    
+                    if full_path and os.path.exists(full_path):
+                        # Si line_num est vide (clic sur un dossier ou fichier parent), on envoie None
+                        # Sinon on envoie le numéro (ex: '42')
+                        target = line_num if (line_num and str(line_num).isdigit()) else None
+                        
+                        # APPEL AVEC L'ARGUMENT CIBLE
+                        self.load_file_direct(full_path, target_line=target)
+            except Exception as e:
+                print(f"Erreur double clic : {e}")
+
+        result_tree.bind("<Double-1>", on_double_click)
+
     # =========================================================================
     #  DATEDITOR (PRINCIPAL) - MENU, INSERTION & UNDO
     # =========================================================================
@@ -2646,20 +3058,110 @@ class DatEditor:
         self.modified = False
 
     def save_file(self):
+        """
+        Enregistre le fichier.
+        RÈGLE STRICTE :
+        - Si nom contient "varexp" -> On écrit les titres (headers).
+        - Sinon -> On n'écrit PAS les titres (juste les données).
+        - Nettoie toujours la colonne "Ligne" (ajoutée par la recherche) si présente.
+        """
         if not self.data:
             return
-        path = filedialog.asksaveasfilename(defaultextension=".dat",
-                                            filetypes=[("DAT files", "*.dat")])
+        
+        # Préparation du nom par défaut
+        default_ext = ".dat"
+        initial_name = "Nouveau.dat"
+        
+        if hasattr(self, 'current_file_path') and self.current_file_path:
+            initial_name = os.path.basename(self.current_file_path)
+            _, ext = os.path.splitext(initial_name)
+            if ext.lower() in ['.dat', '.csv', '.xlsx']:
+                default_ext = ext.lower()
+
+        path = filedialog.asksaveasfilename(
+            title="Enregistrer sous...",
+            initialfile=initial_name,
+            defaultextension=default_ext,
+            filetypes=[("DAT files", "*.dat"), ("CSV files", "*.csv"), ("Excel", "*.xlsx")]
+        )
+        
         if not path:
             return
+        
         try:
-            with open(path, 'w', newline='', encoding='latin-1') as f:
-                writer = csv.writer(f, delimiter=',', quotechar='"')
-                if self.first_line:
-                    writer.writerow(self.first_line)
-                writer.writerows(self.data)
-            messagebox.showinfo("Succès", "Fichier enregistré")
+            # === 1. NETTOYAGE DES DONNÉES (Suppression colonne "Ligne") ===
+            # On travaille sur une copie pour ne pas modifier l'affichage
+            data_to_save = [list(row) for row in self.data]
+            
+            # On détecte si la colonne "Ligne" est présente (c'est toujours la colonne 0 si elle existe)
+            # On se base sur self.headers actuel pour le savoir
+            has_line_col = False
+            if self.headers and str(self.headers[0]) == "Ligne":
+                has_line_col = True
+            
+            # Si la colonne "Ligne" existe, on la retire des données
+            if has_line_col:
+                for row in data_to_save:
+                    if row: row.pop(0)
+
+            # === 2. GESTION DES TITRES (HEADERS) ===
+            headers_to_save = [] # Par défaut : VIDE (Pas de titres)
+            
+            filename_lower = os.path.basename(path).lower()
+            
+            # CONDITION : On ajoute les titres SEULEMENT si c'est un Varexp
+            if "varexp" in filename_lower:
+                # On récupère les titres (soit first_line, soit headers actuels)
+                raw_headers = list(self.first_line) if self.first_line else list(self.headers)
+                
+                # Si on a récupéré des titres, on doit aussi enlever "Ligne" s'il est dedans
+                if raw_headers:
+                    # Si le premier titre est "Ligne", on l'enlève
+                    if str(raw_headers[0]) == "Ligne":
+                        raw_headers.pop(0)
+                    # S'il reste des titres, on les garde pour la sauvegarde
+                    if raw_headers:
+                        headers_to_save = raw_headers
+
+            # === 3. ÉCRITURE ===
+            save_ext = os.path.splitext(path)[1].lower()
+            
+            # A. Cas Excel
+            if save_ext == ".xlsx":
+                if pd is None:
+                    messagebox.showerror("Erreur", "Pandas requis pour Excel.")
+                    return
+                
+                df = pd.DataFrame(data_to_save)
+                
+                # Si on a des headers (donc c'est un varexp), on les met
+                if headers_to_save:
+                    df.columns = headers_to_save
+                    df.to_excel(path, index=False)
+                else:
+                    # Sinon, on dit à Excel de ne pas mettre de header
+                    df.to_excel(path, index=False, header=False)
+                
+            # B. Cas DAT / CSV
+            else:
+                delimiter = ',' if save_ext == '.dat' else ','
+                
+                with open(path, 'w', newline='', encoding='latin-1') as f:
+                    writer = csv.writer(f, delimiter=delimiter, quotechar='"')
+                    
+                    # On écrit les headers UNIQUEMENT si headers_to_save n'est pas vide
+                    # (C'est-à-dire uniquement si c'est un varexp)
+                    if headers_to_save:
+                        writer.writerow(headers_to_save)
+                    
+                    # On écrit les données
+                    writer.writerows(data_to_save)
+
+            messagebox.showinfo("Succès", f"Fichier enregistré : {os.path.basename(path)}")
             self.modified = False
+            self.current_file_path = path
+            self.root.title(f"Éditeur - {os.path.basename(path)}")
+
         except Exception as e:
             messagebox.showerror("Erreur", str(e))
 
@@ -2685,69 +3187,95 @@ class DatEditor:
             self.column_window = None
             
     def open_any_dat_file(self):
-        path = filedialog.askopenfilename(
-            title="Ouvrir un fichier .DAT",
-            filetypes=[("Fichiers DAT", "*.dat"), ("Tous les fichiers", "*.*")]
-        )
-        if not path:
+        """
+        Ouvre un fichier arbitraire.
+        - Si Tabulaire (.dat, .csv, .xlsx) -> Charge dans la grille principale.
+        - Si Texte (.txt, .py, .ini...) -> Ouvre la fenêtre d'édition texte.
+        """
+        # 1. Demande de fichier avec filtres étendus
+        filetypes = [
+            ("Tous les fichiers", "*.*")
+        ]
+        
+        file_path = filedialog.askopenfilename(title="Ouvrir un fichier", filetypes=filetypes)
+        
+        if not file_path:
             return
-    
-        self.selected_folder = os.path.dirname(path)
-    
-        import csv
-    
-        data = []
-        try:
-            with open(path, 'r', encoding='latin-1') as f:
-                reader = csv.reader(f, delimiter=',', quotechar='"')
-                for row in reader:
-                    data.append(row)
-        except Exception as e:
-            messagebox.showerror("Erreur", f"Impossible de lire le fichier : {e}")
-            return
-    
-        if not data:
-            messagebox.showwarning("Attention", "Le fichier est vide.")
-            return
-    
-        # 🔥 Longueur max
-        max_cols = max(len(r) for r in data)
-    
-        # 🔥 Normalisation de toutes les lignes
-        for row in data:
-            if len(row) < max_cols:
-                row.extend([""] * (max_cols - len(row)))
-    
-        # 🔥 Génération automatique des headers
-        self.headers = [f"Col_{i+1}" for i in range(max_cols)]
-    
-        self.data = data
-        self.visible_columns = self.headers.copy()
-        self.filtered_indices = list(range(len(self.data)))
-    
-        # Highlight special
-        self.highlight_module_button('open_any')
-        self.buttons['open_any'].config(bg=self.COLORS["accent"])
 
-        self.buttons['create_var'].config(state="disabled")
-        self.buttons['create_event'].config(state="disabled")       # active création EVENT
-        self.buttons['create_exprv'].config(state="disabled")     # désactive création EXPRV
-        self.buttons['create_cyclic'].config(state="disabled")    # désactive création CYCLIC
-        self.buttons['create_vartreat'].config(state="disabled")
-    
-        self.modified = False
-        
-        # Mettre à jour les colonnes visibles et filtrables
-        self.visible_columns = [h for h in self.headers if h and "unnamed" not in h.lower()]
-        self.filtered_indices = list(range(len(self.data)))
-        
-        # 🔹 Mettre à jour les combobox de filtrage pour le nouveau fichier
-        for combobox in [self.column_filter1, self.column_filter2, self.column_filter3]:
-            combobox['values'] = self.visible_columns
-            if self.visible_columns:
-                combobox.current(0)
-        
-        self.refresh_tree()
+        # 2. Analyse de l'extension
+        ext = os.path.splitext(file_path)[1].lower()
+        tabular_extensions = ['.dat', '.csv', '.xlsx', '.xls']
+
+        # 3. AIGUILLAGE : Cas fichier TEXTE -> Ouvrir le viewer
+        if ext not in tabular_extensions:
+            self.open_text_viewer(file_path)
+            return
+
+        # 4. CAS FICHIER DONNÉES -> Chargement dans le tableau principal
+        try:
+            self.selected_folder = os.path.dirname(file_path)
+            filename = os.path.basename(file_path)
+            
+            self.data = []
+            self.headers = []
+            
+            # Lecture Excel
+            if ext in ['.xlsx', '.xls']:
+                if pd is None:
+                    messagebox.showerror("Erreur", "Pandas n'est pas installé.")
+                    return
+                df = pd.read_excel(file_path, dtype=str).fillna("")
+                self.headers = list(df.columns)
+                self.data = df.values.tolist()
+            
+            # Lecture CSV/DAT
+            else:
+                with open(file_path, 'r', encoding='latin-1', errors='replace') as f:
+                    # Détection séparateur
+                    sample = f.read(1024)
+                    f.seek(0)
+                    delimiter = ';' 
+                    if ',' in sample and ';' not in sample: delimiter = ','
+                    
+                    reader = csv.reader(f, delimiter=delimiter)
+                    self.data = list(reader)
+
+                # Gestion Headers (Logique standard DAT)
+                # On essaie de détecter des headers connus, sinon on prend la ligne 1
+                detected_headers = []
+                # ... (Votre bloc de détection header_map existant si vous l'avez, sinon optionnel) ...
+                
+                if self.data and not self.headers:
+                    # Comportement standard : La ligne 1 est le titre
+                    self.headers = self.data.pop(0) 
+
+            # Padding (Sécurité)
+            if self.data:
+                max_cols = max(len(row) for row in self.data)
+                # Si headers manquants
+                while len(self.headers) < max_cols: 
+                    self.headers.append(f"Col_{len(self.headers)+1}")
+                
+                # Si données manquantes
+                for row in self.data:
+                    if len(row) < len(self.headers):
+                        row.extend([""] * (len(self.headers) - len(row)))
+            else:
+                self.headers = []
+
+            # Finalisation Affichage
+            self.visible_columns = self.headers
+            self.filtered_indices = list(range(len(self.data)))
+            self.refresh_tree()
+            
+            self.root.title(f"Éditeur - {filename}")
+            self.last_search_index = -1
+            self.modified = False
+            
+            messagebox.showinfo("Ouverture", f"Fichier '{filename}' chargé dans l'éditeur.")
+
+        except Exception as e:
+            messagebox.showerror("Erreur", f"Impossible d'ouvrir le fichier :\n{e}")
 
     # ================= SCROLLING FILES =================
     def load_varexp(self):
