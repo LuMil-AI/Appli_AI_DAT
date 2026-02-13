@@ -1447,6 +1447,45 @@ class DatEditor:
         self.sort_state = {}
         self.saved_advanced_params = {} 
         
+        # === GESTION DE L'ICÔNE (CORRIGÉE ET BLINDÉE) ===
+        try:
+            import os
+            import sys
+            import ctypes
+            
+            # 1. Récupérer le chemin ABSOLU du dossier où se trouve ce fichier .py
+            # C'est la seule façon sûre de trouver l'image peu importe comment on lance le script
+            base_folder = os.path.dirname(os.path.abspath(__file__))
+            icon_path_png = os.path.join(base_folder, "app_icon.png")
+            icon_path_ico = os.path.join(base_folder, "app_icon.ico")
+
+            # 2. Astuce Windows pour la barre des tâches
+            # Permet à Windows de considérer ceci comme une vraie App et pas juste un script Python
+            if sys.platform.startswith('win'):
+                myappid = 'mon.entreprise.editeurdat.version1.0' # Un ID unique arbitraire
+                try:
+                    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+                except:
+                    pass
+
+            # 3. Chargement de l'icône
+            # On privilégie le PNG avec iconphoto (plus moderne et gère la transparence)
+            if os.path.exists(icon_path_png):
+                # IMPORTANT : on utilise self.icon_img pour garder l'image en mémoire
+                self.icon_img = tk.PhotoImage(file=icon_path_png)
+                self.root.iconphoto(True, self.icon_img)
+                print(f"Icône PNG chargée : {icon_path_png}")
+            
+            # Fallback sur le .ico si le PNG échoue ou pour les vieilles fenêtres Windows
+            elif os.path.exists(icon_path_ico) and sys.platform.startswith('win'):
+                self.root.iconbitmap(icon_path_ico)
+                print(f"Icône ICO chargée : {icon_path_ico}")
+            else:
+                print(f"Aucune icône trouvée aux chemins :\n{icon_path_png}\n{icon_path_ico}")
+
+        except Exception as e:
+            print(f"Erreur lors du chargement de l'icône : {e}")
+
         # Fonction pour repositionner l'Entry si nécessaire
         def reposition_entry(event=None):
             if self.editing_entry and self.editing_item is not None:
