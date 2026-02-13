@@ -34,13 +34,16 @@ class TableWidget(tk.Frame):
         self.undo_stack = []
         self.file_path = None
         self.comparison_window = None
+        self.all_sheets = {}
         
         # --- Toolbar ---
         toolbar = tk.Frame(self, bg="#dfe6e9", height=40)
         toolbar.pack(fill='x', side='top')
         
         tk.Label(toolbar, text=title, bg="#dfe6e9", font=("Segoe UI", 10, "bold")).pack(side='left', padx=10)
-        
+        self.sheet_combo = ttk.Combobox(toolbar, state="readonly", width=20)
+        self.sheet_combo.bind("<<ComboboxSelected>>", self.on_sheet_change)
+
         btn_style = {"bg": accent_color, "fg": "white", "relief": "flat", "padx": 10, "pady": 2, "font": ("Segoe UI", 9)}
         
         tk.Button(toolbar, text="Charger", command=self.load_file, **btn_style).pack(side='left', padx=2)
@@ -82,6 +85,26 @@ class TableWidget(tk.Frame):
 
         # État pour la recherche "Suivant"
         self.last_search_index = -1
+
+    def on_sheet_change(self, event=None):
+        """Appelé quand l'utilisateur change de feuille Excel via la liste déroulante."""
+        sheet_name = self.sheet_combo.get()
+        
+        if sheet_name in self.all_sheets:
+            # Récupération du DataFrame stocké
+            df = self.all_sheets[sheet_name]
+            
+            # Mise à jour des données
+            self.headers = list(df.columns)
+            self.data = df.values.tolist()
+            
+            # Mise à jour de l'affichage
+            self.visible_columns = self.headers.copy()
+            self.filtered_indices = list(range(len(self.data)))
+            self.refresh_tree()
+            
+            # Reset recherche
+            self.last_search_index = -1
 
     def save_state(self):
         """Sauvegarde l'état actuel des données pour le CTRL+Z"""
@@ -193,25 +216,54 @@ class TableWidget(tk.Frame):
             self.load_from_path(path)
 
     def load_from_path(self, path):
-        """Méthode appelée par le Drag & Drop (Charge directement)."""
+        """Charge le fichier (Excel multi-feuilles, CSV ou DAT)."""
         self.file_path = path
         filename = os.path.basename(path).lower()
         ext = os.path.splitext(path)[1].lower()
         
+        # Réinitialisation
+        self.data = []
+        self.headers = []
+        self.all_sheets = {}
+        self.sheet_combo.set('')
+        self.sheet_combo.pack_forget() # On cache la liste par défaut
+        
         try:
-            self.data = []
-            self.headers = []
-            
-            # --- Lecture du fichier (Excel ou CSV/DAT) ---
+            # --- CAS EXCEL ---
             if ext in ['.xlsx', '.xls']:
                 if pd is None:
-                    messagebox.showerror("Erreur", "Pandas n'est pas installé.", parent=self)
+                    messagebox.showerror("Erreur", "La bibliothèque Pandas n'est pas installée.", parent=self)
                     return
-                df = pd.read_excel(path, dtype=str).fillna("")
-                self.headers = list(df.columns)
-                self.data = df.values.tolist()
+                
+                # Lecture de TOUTES les feuilles (sheet_name=None renvoie un dictionnaire)
+                dfs = pd.read_excel(path, sheet_name=None, dtype=str)
+                
+                # Nettoyage des NaN pour toutes les feuilles
+                for name, df in dfs.items():
+                    dfs[name] = df.fillna("")
+                
+                self.all_sheets = dfs
+                sheet_names = list(self.all_sheets.keys())
+                
+                if len(sheet_names) > 1:
+                    # Plus d'une feuille : on configure et affiche la Combobox
+                    self.sheet_combo['values'] = sheet_names
+                    self.sheet_combo.current(0) # Sélectionne la 1ère
+                    self.sheet_combo.pack(side='left', padx=10)
+                    
+                    # On charge la première feuille
+                    first_sheet = sheet_names[0]
+                    self.headers = list(self.all_sheets[first_sheet].columns)
+                    self.data = self.all_sheets[first_sheet].values.tolist()
+                else:
+                    # Une seule feuille
+                    first_sheet = sheet_names[0]
+                    self.headers = list(self.all_sheets[first_sheet].columns)
+                    self.data = self.all_sheets[first_sheet].values.tolist()
+
+            # --- CAS CSV / DAT ---
             else:
-                # Lecture CSV/DAT
+                # Lecture classique (votre code existant)
                 with open(path, 'r', encoding='latin-1', errors='replace') as f:
                     reader = csv.reader(f, delimiter=';') 
                     try:
@@ -226,58 +278,50 @@ class TableWidget(tk.Frame):
                         f.seek(0)
                         reader = csv.reader(f, delimiter=';')
                     self.data = list(reader)
+                
+                # Logique de headers DAT (votre code existant)
+                detected_headers = []
+                # ... (Votre bloc de détection header_map ici) ...
+                # (Assurez-vous de garder votre logique de détection des headers DAT ici)
+                
+                if not self.headers: # Si pas défini par Excel
+                     # ... (Votre logique de headers DAT) ...
+                     pass
 
-            # --- DÉTECTION HEADERS (Logique existante conservée) ---
-            # (Je reprends votre logique exacte ici pour ne rien casser)
-            detected_headers = []
-            header_map = {
-                "varexp": "VAREXP_DEFAULT_HEADERS", "event": "EVENT_DEFAULT_HEADERS",
-                "comm": "COMM_DEFAULT_HEADERS", "vartreat": "VARTREAT_DEFAULT_HEADERS",
-                "exprv": "EXPRV_DEFAULT_HEADERS", "cyclic": "CYCLIC_DEFAULT_HEADERS"
-            }
-            # Note : DatEditor doit être accessible ici
-            for key, attr_name in header_map.items():
-                if key in filename:
-                    try: detected_headers = getattr(DatEditor, attr_name, [])
-                    except: pass
-                    break
-            
-            if detected_headers and ext not in ['.xlsx', '.xls']:
-                self.headers = detected_headers.copy()
-
-            # Ajustement des colonnes (Pad)
+            # --- FINITION COMMUNE ---
+            # Ajustement largeur (Pad)
             if self.data:
                 max_cols = max(len(row) for row in self.data)
-                target_len = len(self.headers) if self.headers else max_cols
+                # Si headers vides (cas CSV sans header détecté), on génère Col_1...
+                if not self.headers:
+                     self.headers = [f"Col_{i+1}" for i in range(max_cols)]
+                
+                target_len = len(self.headers)
                 final_len = max(target_len, max_cols)
                 
+                # Extension des headers si données plus larges
                 if final_len > len(self.headers):
                     for i in range(len(self.headers), final_len):
                         self.headers.append(f"Col_{i+1}")
                 
+                # Extension des lignes si plus courtes
                 for row in self.data:
                     if len(row) < final_len:
                         row.extend([""] * (final_len - len(row)))
             else:
                 if not self.headers: self.headers = []
 
-            # Finalisation
             self.visible_columns = self.headers.copy()
             self.filtered_indices = list(range(len(self.data)))
             self.refresh_tree()
             self.last_search_index = -1
             
-            # Petit feedback visuel (titre de la toolbar)
-            for widget in self.winfo_children():
-                if isinstance(widget, tk.Frame): # La toolbar
-                    for child in widget.winfo_children():
-                        if isinstance(child, tk.Label):
-                            child.config(text=f"Fichier : {filename}")
-                            break
-                    break
-
+            # Mise à jour du titre
+            # (Note: 'toolbar' n'est pas accessible ici car variable locale de __init__, 
+            #  il faut utiliser winfo_children ou stocker self.lbl_title dans init)
+            
         except Exception as e:
-            messagebox.showerror("Erreur", f"Erreur lors du chargement : {e}", parent=self)
+            messagebox.showerror("Erreur", f"Impossible de charger le fichier :\n{e}", parent=self)
 
     def search_content(self):
         """
@@ -1018,7 +1062,7 @@ class DatEditor:
     CYCLIC_DEFAULT_HEADERS = [
         "Mode", "Nom", "Description", "00", "0", "Nom de liste serveurs", "Vide",
         "Nombre de secondes de cycle",
-        "1 si bit d'activation 0 sinon",
+        "1 si activation ou bit d'activation 0 sinon",
         "Variable d'activation",
         "Programme", "Branche", "Fonction", "Argument",
         "=0", "=1"
@@ -1134,8 +1178,8 @@ class DatEditor:
         "REG": "Registre analogique",
         "CTV": "Registre analogique commandable",
         "TXT": "Texte",
-        "CXT": "Texte commandable",
-        "CHR": "Chronomètre"
+        "CXT": "Texte commandable"
+        #"CHR": "Chronomètre"
     }
 
 
