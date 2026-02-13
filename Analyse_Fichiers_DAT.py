@@ -1743,6 +1743,7 @@ class DatEditor:
 
         # === CAS FICHIER TABLEAU (Code précédent) ===
         try:
+            self.current_file_path = file_path
             self.selected_folder = os.path.dirname(file_path)
             filename = os.path.basename(file_path)
             
@@ -3057,20 +3058,110 @@ class DatEditor:
         self.modified = False
 
     def save_file(self):
+        """
+        Enregistre le fichier.
+        RÈGLE STRICTE :
+        - Si nom contient "varexp" -> On écrit les titres (headers).
+        - Sinon -> On n'écrit PAS les titres (juste les données).
+        - Nettoie toujours la colonne "Ligne" (ajoutée par la recherche) si présente.
+        """
         if not self.data:
             return
-        path = filedialog.asksaveasfilename(defaultextension=".dat",
-                                            filetypes=[("DAT files", "*.dat")])
+        
+        # Préparation du nom par défaut
+        default_ext = ".dat"
+        initial_name = "Nouveau.dat"
+        
+        if hasattr(self, 'current_file_path') and self.current_file_path:
+            initial_name = os.path.basename(self.current_file_path)
+            _, ext = os.path.splitext(initial_name)
+            if ext.lower() in ['.dat', '.csv', '.xlsx']:
+                default_ext = ext.lower()
+
+        path = filedialog.asksaveasfilename(
+            title="Enregistrer sous...",
+            initialfile=initial_name,
+            defaultextension=default_ext,
+            filetypes=[("DAT files", "*.dat"), ("CSV files", "*.csv"), ("Excel", "*.xlsx")]
+        )
+        
         if not path:
             return
+        
         try:
-            with open(path, 'w', newline='', encoding='latin-1') as f:
-                writer = csv.writer(f, delimiter=',', quotechar='"')
-                if self.first_line:
-                    writer.writerow(self.first_line)
-                writer.writerows(self.data)
-            messagebox.showinfo("Succès", "Fichier enregistré")
+            # === 1. NETTOYAGE DES DONNÉES (Suppression colonne "Ligne") ===
+            # On travaille sur une copie pour ne pas modifier l'affichage
+            data_to_save = [list(row) for row in self.data]
+            
+            # On détecte si la colonne "Ligne" est présente (c'est toujours la colonne 0 si elle existe)
+            # On se base sur self.headers actuel pour le savoir
+            has_line_col = False
+            if self.headers and str(self.headers[0]) == "Ligne":
+                has_line_col = True
+            
+            # Si la colonne "Ligne" existe, on la retire des données
+            if has_line_col:
+                for row in data_to_save:
+                    if row: row.pop(0)
+
+            # === 2. GESTION DES TITRES (HEADERS) ===
+            headers_to_save = [] # Par défaut : VIDE (Pas de titres)
+            
+            filename_lower = os.path.basename(path).lower()
+            
+            # CONDITION : On ajoute les titres SEULEMENT si c'est un Varexp
+            if "varexp" in filename_lower:
+                # On récupère les titres (soit first_line, soit headers actuels)
+                raw_headers = list(self.first_line) if self.first_line else list(self.headers)
+                
+                # Si on a récupéré des titres, on doit aussi enlever "Ligne" s'il est dedans
+                if raw_headers:
+                    # Si le premier titre est "Ligne", on l'enlève
+                    if str(raw_headers[0]) == "Ligne":
+                        raw_headers.pop(0)
+                    # S'il reste des titres, on les garde pour la sauvegarde
+                    if raw_headers:
+                        headers_to_save = raw_headers
+
+            # === 3. ÉCRITURE ===
+            save_ext = os.path.splitext(path)[1].lower()
+            
+            # A. Cas Excel
+            if save_ext == ".xlsx":
+                if pd is None:
+                    messagebox.showerror("Erreur", "Pandas requis pour Excel.")
+                    return
+                
+                df = pd.DataFrame(data_to_save)
+                
+                # Si on a des headers (donc c'est un varexp), on les met
+                if headers_to_save:
+                    df.columns = headers_to_save
+                    df.to_excel(path, index=False)
+                else:
+                    # Sinon, on dit à Excel de ne pas mettre de header
+                    df.to_excel(path, index=False, header=False)
+                
+            # B. Cas DAT / CSV
+            else:
+                delimiter = ',' if save_ext == '.dat' else ','
+                
+                with open(path, 'w', newline='', encoding='latin-1') as f:
+                    writer = csv.writer(f, delimiter=delimiter, quotechar='"')
+                    
+                    # On écrit les headers UNIQUEMENT si headers_to_save n'est pas vide
+                    # (C'est-à-dire uniquement si c'est un varexp)
+                    if headers_to_save:
+                        writer.writerow(headers_to_save)
+                    
+                    # On écrit les données
+                    writer.writerows(data_to_save)
+
+            messagebox.showinfo("Succès", f"Fichier enregistré : {os.path.basename(path)}")
             self.modified = False
+            self.current_file_path = path
+            self.root.title(f"Éditeur - {os.path.basename(path)}")
+
         except Exception as e:
             messagebox.showerror("Erreur", str(e))
 
