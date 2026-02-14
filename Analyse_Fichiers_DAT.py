@@ -1638,7 +1638,7 @@ class DatEditor:
     def open_text_viewer(self, file_path, target_line=None):
         """
         Ouvre un Éditeur de texte simple pour les fichiers non-tabulaires (.py, .txt, .ini...).
-        Permet la modification et l'enregistrement.
+        Permet la modification, l'enregistrement et la recherche/remplacement.
         """
         filename = os.path.basename(file_path)
         
@@ -1654,25 +1654,125 @@ class DatEditor:
         # Fonction de sauvegarde interne
         def save_changes(event=None):
             try:
-                # "1.0" = début, "end-1c" = fin sans le saut de ligne automatique ajouté par Tkinter
                 content = txt_area.get("1.0", "end-1c")
-                
-                # On écrit en latin-1 pour rester cohérent avec la lecture (ou utf-8 selon vos besoins)
                 with open(file_path, "w", encoding="latin-1") as f:
                     f.write(content)
-                
                 messagebox.showinfo("Succès", f"Fichier '{filename}' enregistré !", parent=viewer)
-                return "break" # Pour empêcher d'autres events si appelé via Ctrl+S
+                return "break"
             except Exception as e:
                 messagebox.showerror("Erreur", f"Impossible d'enregistrer :\n{e}", parent=viewer)
 
         # Bouton Sauvegarder
         btn_save = tk.Button(toolbar, text="💾 Enregistrer", command=save_changes, 
-                             bg=self.COLORS["success"], fg="white", font=("Segoe UI", 9, "bold"))
+                             bg=self.COLORS["success"], fg="white", font=("Segoe UI", 9, "bold"), relief="flat", padx=10)
         btn_save.pack(side="left", padx=5)
 
+        # === NOUVEAU : FONCTION RECHERCHER / REMPLACER ===
+        def open_find_replace(event=None):
+            # Fenêtre de dialogue
+            top = tk.Toplevel(viewer)
+            top.title("Rechercher et Remplacer")
+            top.geometry("380x160")
+            top.transient(viewer) # Reste au-dessus de l'éditeur
+            top.resizable(False, False)
+            
+            # Variables
+            search_idx = ["1.0"] # Liste pour pouvoir la modifier dans les sous-fonctions
+            
+            # UI
+            tk.Label(top, text="Rechercher :").grid(row=0, column=0, padx=10, pady=10, sticky="e")
+            ent_find = tk.Entry(top, width=30)
+            ent_find.grid(row=0, column=1, padx=5, pady=10)
+            ent_find.focus_set()
+            
+            tk.Label(top, text="Remplacer par :").grid(row=1, column=0, padx=10, pady=5, sticky="e")
+            ent_replace = tk.Entry(top, width=30)
+            ent_replace.grid(row=1, column=1, padx=5, pady=5)
+            
+            # --- Logique de recherche ---
+            def do_find():
+                txt_area.tag_remove('found', '1.0', tk.END) # Nettoie les anciennes recherches
+                target = ent_find.get()
+                if target:
+                    # Recherche insensible à la casse (nocase=1)
+                    idx = txt_area.search(target, search_idx[0], nocase=1, stopindex=tk.END)
+                    if idx:
+                        # Calcule la fin du mot trouvé
+                        end_idx = f"{idx}+{len(target)}c"
+                        search_idx[0] = end_idx # Met à jour la position pour le "Suivant"
+                        
+                        # Surligne visuellement
+                        txt_area.tag_add('found', idx, end_idx)
+                        txt_area.tag_config('found', background='yellow', foreground='black')
+                        
+                        # Scrolle vers l'occurrence et la sélectionne
+                        txt_area.see(idx)
+                        txt_area.tag_remove("sel", "1.0", tk.END)
+                        txt_area.tag_add("sel", idx, end_idx)
+                        return True
+                    else:
+                        search_idx[0] = "1.0" # Boucle au début
+                        messagebox.showinfo("Information", "Fin du document atteinte.\nLa recherche reprendra au début.", parent=top)
+                return False
+
+            # --- Logique de remplacement simple ---
+            def do_replace():
+                try:
+                    # Si du texte est actuellement sélectionné par la recherche
+                    sel_start = txt_area.index("sel.first")
+                    sel_end = txt_area.index("sel.last")
+                    
+                    target = ent_find.get()
+                    # Vérification de sécurité (pour ne pas remplacer n'importe quoi)
+                    if txt_area.get(sel_start, sel_end).lower() == target.lower():
+                        txt_area.delete(sel_start, sel_end)
+                        txt_area.insert(sel_start, ent_replace.get())
+                        do_find() # Passe automatiquement au suivant
+                except tk.TclError:
+                    # Rien n'est sélectionné, on lance juste une recherche
+                    do_find()
+
+            # --- Logique tout remplacer ---
+            def do_replace_all():
+                target = ent_find.get()
+                replacement = ent_replace.get()
+                if not target: return
+                
+                count = 0
+                idx = "1.0"
+                while True:
+                    idx = txt_area.search(target, idx, nocase=1, stopindex=tk.END)
+                    if not idx: break
+                    
+                    end_idx = f"{idx}+{len(target)}c"
+                    txt_area.delete(idx, end_idx)
+                    txt_area.insert(idx, replacement)
+                    
+                    # On avance l'index de la longueur du nouveau mot
+                    idx = f"{idx}+{len(replacement)}c" 
+                    count += 1
+                    
+                messagebox.showinfo("Succès", f"{count} remplacements effectués.", parent=top)
+
+            # Boutons d'action
+            btn_frame = tk.Frame(top)
+            btn_frame.grid(row=2, column=0, columnspan=2, pady=15)
+            
+            tk.Button(btn_frame, text="Rechercher Suivant", command=do_find, bg="#3498db", fg="white", relief="flat", padx=5).pack(side="left", padx=5)
+            tk.Button(btn_frame, text="Remplacer", command=do_replace, relief="flat", padx=5).pack(side="left", padx=5)
+            tk.Button(btn_frame, text="Remplacer Tout", command=do_replace_all, bg="#e67e22", fg="white", relief="flat", padx=5).pack(side="left", padx=5)
+            
+            # Lier Entrée à la recherche
+            top.bind("<Return>", lambda e: do_find())
+
+        # Bouton Rechercher/Remplacer dans la barre d'outils
+        btn_sr = tk.Button(toolbar, text="🔍 Rechercher / Remplacer", command=open_find_replace, 
+                           bg="#3498db", fg="white", font=("Segoe UI", 9, "bold"), relief="flat", padx=10)
+        btn_sr.pack(side="left", padx=5)
+        # =================================================
+
         # Bouton Fermer
-        tk.Button(toolbar, text="Fermer", command=viewer.destroy, bg="#95a5a6", fg="white").pack(side="right", padx=5)
+        tk.Button(toolbar, text="Fermer", command=viewer.destroy, bg="#95a5a6", fg="white", relief="flat", padx=10).pack(side="right", padx=5)
         
         # Label Info
         lbl_path = tk.Label(toolbar, text=file_path, bg="#ecf0f1", fg="#7f8c8d", font=("Segoe UI", 8))
@@ -1682,10 +1782,8 @@ class DatEditor:
         frame_txt = tk.Frame(viewer)
         frame_txt.pack(fill="both", expand=True)
         
-        # Widget Text (UNDO=True permet le Ctrl+Z !)
         txt_area = tk.Text(frame_txt, wrap="none", font=("Consolas", 10), undo=True)
         
-        # Scrollbars
         vsb = ttk.Scrollbar(frame_txt, orient="vertical", command=txt_area.yview)
         hsb = ttk.Scrollbar(frame_txt, orient="horizontal", command=txt_area.xview)
         txt_area.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
@@ -1694,29 +1792,23 @@ class DatEditor:
         hsb.pack(side="bottom", fill="x")
         txt_area.pack(side="left", fill="both", expand=True)
         
-        # Bind du raccourci Ctrl+S
+        # Binds Raccourcis
         viewer.bind("<Control-s>", save_changes)
+        viewer.bind("<Control-f>", open_find_replace) # Raccourci classique de recherche
 
         # --- CHARGEMENT ---
         try:
-            # Lecture en latin-1 (standard industrie) ou utf-8
             with open(file_path, "r", encoding="latin-1", errors="ignore") as f:
                 content = f.read()
                 txt_area.insert("1.0", content)
-                
-            # NOTE : On ne met PLUS state="disabled" ici pour permettre l'édition
             
-            # Gestion du focus sur la ligne trouvée (Recherche Globale)
+            # Si on vient de la recherche globale et qu'on vise une ligne
             if target_line:
                 idx = f"{target_line}.0"
-                
-                # Surlignage
-                txt_area.tag_add("highlight", idx, f"{target_line}.end")
-                txt_area.tag_config("highlight", background="yellow", foreground="black")
-                
-                # Scroll et Focus
+                txt_area.tag_add("highlight_search", idx, f"{target_line}.end")
+                txt_area.tag_config("highlight_search", background="#ffeaa7", foreground="black") # Jaune pastel doux
                 txt_area.see(idx)
-                txt_area.mark_set("insert", idx) # Place le curseur au début de la ligne
+                txt_area.mark_set("insert", idx)
                 txt_area.focus_set()
                 
         except Exception as e:
@@ -2562,7 +2654,7 @@ class DatEditor:
     
         win = tk.Toplevel(self.root)
         win.title("Recherche / Remplacement")
-        win.geometry("500x280")
+        win.geometry("500x200")
         win.configure(bg="white")
     
         tk.Label(win, text="Rechercher :", bg="white").pack(anchor='w', padx=10, pady=5)
@@ -4407,7 +4499,7 @@ class DatEditor:
             self.refresh_tree()
             self.scroll_bottom()
             
-            messagebox.showinfo("Succès", f"Variable '{var_name}' créée (ID: {new_row[col_tag_idx]}).")
+            #messagebox.showinfo("Succès", f"Variable '{var_name}' créée (ID: {new_row[col_tag_idx]}).")
 
         except Exception as e:
             messagebox.showerror("Erreur Création", f"Impossible de créer la variable :\n{e}")
