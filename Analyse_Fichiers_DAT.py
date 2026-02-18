@@ -8,6 +8,7 @@ import csv
 import os
 import re
 from tkinter import simpledialog
+import difflib
 
 try:
     import pandas as pd
@@ -83,8 +84,31 @@ class TableWidget(tk.Frame):
         self.tree.bind('<Button-2>', self.show_context_menu) # MacOS (parfois)
         self.tree.bind('<Control-z>', self.undo)
 
+        self.tree.tag_configure('diff_equal', background="white")
+        self.tree.tag_configure('diff_insert', background="#d5f5e3") # Vert clair (Ajout)
+        self.tree.tag_configure('diff_delete', background="#fadbd8") # Rouge clair (Suppression)
+        self.tree.tag_configure('diff_change', background="#fdebd0") # Orange clair (Modif)
+        self.tree.tag_configure('diff_gap', background="#ecf0f1", foreground="#bdc3c7") # Gris (Trou)
+
         # État pour la recherche "Suivant"
         self.last_search_index = -1
+
+    def load_diff_data(self, new_data, row_tags):
+        """
+        Charge les données alignées et applique les couleurs ligne par ligne.
+        """
+        self.data = new_data
+        
+        # Nettoyage visuel
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+            
+        self.filtered_indices = list(range(len(self.data)))
+        
+        # Insertion optimisée avec tags
+        for i, row in enumerate(self.data):
+            tag = row_tags[i] if i < len(row_tags) else ''
+            self.tree.insert('', 'end', iid=str(i), values=row, tags=(tag,))
 
     def on_sheet_change(self, event=None):
         """Appelé quand l'utilisateur change de feuille Excel via la liste déroulante."""
@@ -444,31 +468,67 @@ class TableWidget(tk.Frame):
         column = self.tree.identify_column(event.x)
         if not item_id or not column: return
 
-        row_index = int(item_id)
+        # === MODIF 1 : Empêcher l'édition des lignes "trous" du comparateur ===
+        # On vérifie si la ligne a le tag 'diff_gap' (le gris)
+        tags = self.tree.item(item_id, "tags")
+        if "diff_gap" in tags:
+            return 
+
+        try:
+            row_index = int(item_id)
+        except ValueError:
+            return # Sécurité si l'ID n'est pas un nombre
+
         col_num = int(column.replace('#', '')) - 1
         display_cols = [c for c in self.headers if c in self.visible_columns]
+        
         if col_num < 0 or col_num >= len(display_cols): return
             
         col_name = display_cols[col_num]
         try: real_col_index = self.headers.index(col_name)
         except ValueError: return
         
-        x, y, w, h = self.tree.bbox(item_id, column)
+        # Récupération géométrie et valeur
+        bbox = self.tree.bbox(item_id, column)
+        if not bbox: return
+        x, y, w, h = bbox
+        
         current_val = self.data[row_index][real_col_index] if real_col_index < len(self.data[row_index]) else ""
         
         entry = tk.Entry(self.tree, font=("Segoe UI", 10))
         entry.place(x=x, y=y, width=w, height=h)
         entry.insert(0, str(current_val))
+        entry.select_range(0, tk.END) # Sélectionne tout le texte pour remplacement rapide
         entry.focus()
         
         def save_edit(e):
+            # On vérifie si le widget existe encore pour éviter les erreurs
+            if not entry.winfo_exists(): return
+            
             new_val = entry.get()
-            self.data[row_index][real_col_index] = new_val
+            
+            # Mise à jour des données
+            if row_index < len(self.data):
+                # On s'assure que la ligne est assez longue
+                while len(self.data[row_index]) <= real_col_index:
+                    self.data[row_index].append("")
+                self.data[row_index][real_col_index] = new_val
+                
+            # Mise à jour visuelle (garde les tags existants ex: couleur verte/rouge)
             self.tree.set(item_id, column, new_val)
+            
+            self.modified = True
             entry.destroy()
             
+        # === MODIF 2 : Sauvegarder en cliquant ailleurs (FocusOut) ===
+        # Avant c'était : lambda e: entry.destroy() -> Cela annulait tout !
+        entry.bind("<FocusOut>", save_edit)
+        
+        # Validation par Entrée
         entry.bind("<Return>", save_edit)
-        entry.bind("<FocusOut>", lambda e: entry.destroy())
+        
+        # === MODIF 3 : Touche Echap pour annuler ===
+        entry.bind("<Escape>", lambda e: entry.destroy())
 
     def select_columns(self):
         if not self.headers: return
@@ -1581,54 +1641,147 @@ class DatEditor:
 
     def open_compare_window(self):
         """
-        Ouvre une fenêtre avec deux TableWidgets côte à côte (Split View)
-        supportant le Drag & Drop de fichiers .xlsx, .csv, .dat.
+        Ouvre le comparateur avec glisser-déposer ET fonction WinMerge (Diff).
         """
-        # 1. Création de la fenêtre
         comp_win = tk.Toplevel(self.root)
-        comp_win.title("Comparateur Universel (Excel, CSV, DAT)")
+        comp_win.title("Comparateur Avancé (WinMerge Style)")
         comp_win.geometry("1600x900")
         
-        # 2. Utilisation d'un PanedWindow pour redimensionner gauche/droite
-        paned = tk.PanedWindow(comp_win, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=4)
+        # --- BARRE D'OUTILS DE COMPARAISON (Haut) ---
+        top_bar = tk.Frame(comp_win, bg="#ecf0f1", pady=5)
+        top_bar.pack(fill="x")
+        
+        # LOGIQUE DE COMPARAISON WINMERGE
+        def run_smart_compare():
+            # 1. Récupération des données brutes
+            data_l = table_left.data
+            data_r = table_right.data
+            
+            if not data_l or not data_r:
+                messagebox.showwarning("Comparaison", "Veuillez charger deux fichiers d'abord.")
+                return
+
+            # 2. Préparation pour difflib
+            # Difflib travaille mieux sur des chaines ou tuples hashables.
+            # On convertit chaque ligne (liste) en tuple pour la comparaison
+            # On ignore la colonne "Ligne" si elle existe déjà
+            rows_l = [tuple(r) for r in data_l]
+            rows_r = [tuple(r) for r in data_r]
+            
+            # 3. Calcul du Diff (SequenceMatcher)
+            matcher = difflib.SequenceMatcher(None, rows_l, rows_r)
+            
+            # Listes finales alignées
+            final_l = []
+            tags_l = []
+            final_r = []
+            tags_r = []
+            
+            # Une ligne vide pour combler les trous (avec la bonne largeur)
+            len_l = len(table_left.headers)
+            len_r = len(table_right.headers)
+            empty_row_l = [""] * len_l
+            empty_row_r = [""] * len_r
+            
+            # 4. Traitement des Opcodes (Les instructions de différence)
+            for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+                
+                # Séquence IDENTIQUE (EQUAL)
+                if tag == 'equal':
+                    for k in range(i1, i2):
+                        final_l.append(data_l[k])
+                        tags_l.append('diff_equal')
+                    for k in range(j1, j2):
+                        final_r.append(data_r[k])
+                        tags_r.append('diff_equal')
+                
+                # REMPLACEMENT (Modifié)
+                elif tag == 'replace':
+                    # On affiche les lignes modifiées de chaque côté
+                    # Note : Si les tailles diffèrent, on comble avec des trous
+                    len_chunk_l = i2 - i1
+                    len_chunk_r = j2 - j1
+                    max_len = max(len_chunk_l, len_chunk_r)
+                    
+                    for k in range(max_len):
+                        # Gauche
+                        if k < len_chunk_l:
+                            final_l.append(data_l[i1 + k])
+                            tags_l.append('diff_change') # Orange
+                        else:
+                            final_l.append(["---"] * len_l) # Trou visuel
+                            tags_l.append('diff_gap')
+                            
+                        # Droite
+                        if k < len_chunk_r:
+                            final_r.append(data_r[j1 + k])
+                            tags_r.append('diff_change') # Orange
+                        else:
+                            final_r.append(["---"] * len_r) # Trou visuel
+                            tags_r.append('diff_gap')
+
+                # SUPPRESSION (Dans Gauche, absent de Droite)
+                elif tag == 'delete':
+                    for k in range(i1, i2):
+                        final_l.append(data_l[k])
+                        tags_l.append('diff_delete') # Rouge (Présent ici mais supprimé en face)
+                        
+                        # En face (droite), on met un trou
+                        final_r.append(["---"] * len_r)
+                        tags_r.append('diff_gap') # Gris
+
+                # INSERTION (Absent de Gauche, présent dans Droite)
+                elif tag == 'insert':
+                    for k in range(j1, j2):
+                        # Gauche : Trou
+                        final_l.append(["---"] * len_l)
+                        tags_l.append('diff_gap') # Gris
+                        
+                        # Droite : Vert (Nouveau)
+                        final_r.append(data_r[k])
+                        tags_r.append('diff_insert')
+
+            # 5. Injection des données alignées dans les tableaux
+            table_left.load_diff_data(final_l, tags_l)
+            table_right.load_diff_data(final_r, tags_r)
+            
+            # Synchronisation du scroll (Optionnel mais cool)
+            def sync_yview(*args):
+                table_left.tree.yview_moveto(args[0])
+                table_right.tree.yview_moveto(args[0])
+            
+            # On lie les barres de défilement (attention, peut être complexe si TableWidget encapsule trop)
+            # Une version simple est de ne pas le faire, ou de le faire si on a accès aux scrollbars.
+
+        btn_compare = tk.Button(top_bar, text="⚡ Comparer (Alignement Auto)", command=run_smart_compare, 
+                                bg="#8e44ad", fg="white", font=("Segoe UI", 10, "bold"), padx=15)
+        btn_compare.pack()
+
+        # --- CONTAINER TABLEAUX ---
+        paned = tk.PanedWindow(comp_win, orient=tk.HORIZONTAL, sashrelief=tk.RAISED, sashwidth=4, bg="#bdc3c7")
         paned.pack(fill="both", expand=True)
         
-        # --- WIDGET GAUCHE ---
-        # On crée un conteneur pour gérer le Drop
+        # --- GAUCHE ---
         frame_left = tk.Frame(paned)
         paned.add(frame_left, minsize=400)
-        
-        # Instance du tableau
-        table_left = TableWidget(frame_left, title="Fichier Gauche (Glissez ici)", accent_color="#2980b9")
+        table_left = TableWidget(frame_left, title="Fichier Original (Gauche)", accent_color="#2980b9")
         table_left.pack(fill="both", expand=True)
         
-        # --- WIDGET DROITE ---
+        # --- DROITE ---
         frame_right = tk.Frame(paned)
         paned.add(frame_right, minsize=400)
-        
-        # Instance du tableau
-        table_right = TableWidget(frame_right, title="Fichier Droite (Glissez ici)", accent_color="#d35400")
+        table_right = TableWidget(frame_right, title="Fichier Modifié (Droite)", accent_color="#27ae60")
         table_right.pack(fill="both", expand=True)
         
-        # 3. GESTION DU DRAG & DROP
-        
+        # --- DRAG & DROP ---
         def clean_path(event_data):
-            # Nettoyage des accolades {chemin} que Windows ajoute parfois
             path = event_data
-            if path.startswith('{') and path.endswith('}'):
-                path = path[1:-1]
+            if path.startswith('{') and path.endswith('}'): path = path[1:-1]
             return path
 
-        def drop_left(event):
-            path = clean_path(event.data)
-            # On appelle la nouvelle méthode créée à l'étape 1
-            table_left.load_from_path(path)
+        def drop_left(event): table_left.load_from_path(clean_path(event.data))
+        def drop_right(event): table_right.load_from_path(clean_path(event.data))
 
-        def drop_right(event):
-            path = clean_path(event.data)
-            table_right.load_from_path(path)
-
-        # Activation DND sur les frames conteneurs
         frame_left.drop_target_register(DND_FILES)
         frame_left.dnd_bind('<<Drop>>', drop_left)
         
@@ -1947,7 +2100,7 @@ class DatEditor:
         entry_search.focus_set()
 
         case_sensitive_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(top_frame, text="Respecter la casse", variable=case_sensitive_var, bg=self.COLORS["bg_light"]).pack(side="left", padx=10)
+        tk.Checkbutton(top_frame, text="Respect strict", variable=case_sensitive_var, bg=self.COLORS["bg_light"]).pack(side="left", padx=10)
 
         # --- Arbre des résultats ---
         tree_frame = tk.Frame(search_win)
@@ -3281,11 +3434,14 @@ class DatEditor:
     def open_any_dat_file(self):
         """
         Ouvre un fichier arbitraire.
-        - Si Tabulaire (.dat, .csv, .xlsx) -> Charge dans la grille principale.
+        - Si Tabulaire (.dat, .csv, .xlsx) -> Charge dans la grille principale SANS utiliser la 1ère ligne comme header.
         - Si Texte (.txt, .py, .ini...) -> Ouvre la fenêtre d'édition texte.
         """
-        # 1. Demande de fichier avec filtres étendus
+        # 1. Demande de fichier
         filetypes = [
+            ("Tous les fichiers supportés", "*.dat *.csv *.xlsx *.xls *.txt *.py *.ini *.xml *.log *.cfg"),
+            ("Fichiers de données", "*.dat *.csv *.xlsx *.xls"),
+            ("Fichiers Texte/Code", "*.txt *.py *.ini *.xml *.log *.cfg"),
             ("Tous les fichiers", "*.*")
         ]
         
@@ -3305,22 +3461,23 @@ class DatEditor:
 
         # 4. CAS FICHIER DONNÉES -> Chargement dans le tableau principal
         try:
+            self.current_file_path = file_path # Mémorisation pour sauvegarde
             self.selected_folder = os.path.dirname(file_path)
             filename = os.path.basename(file_path)
             
             self.data = []
             self.headers = []
             
-            # Lecture Excel
+            # --- Lecture Excel ---
             if ext in ['.xlsx', '.xls']:
                 if pd is None:
                     messagebox.showerror("Erreur", "Pandas n'est pas installé.")
                     return
-                df = pd.read_excel(file_path, dtype=str).fillna("")
-                self.headers = list(df.columns)
+                # header=None est CRUCIAL ici : cela dit à Pandas que la ligne 1 est une donnée
+                df = pd.read_excel(file_path, header=None, dtype=str).fillna("")
                 self.data = df.values.tolist()
             
-            # Lecture CSV/DAT
+            # --- Lecture CSV/DAT ---
             else:
                 with open(file_path, 'r', encoding='latin-1', errors='replace') as f:
                     # Détection séparateur
@@ -3332,26 +3489,18 @@ class DatEditor:
                     reader = csv.reader(f, delimiter=delimiter)
                     self.data = list(reader)
 
-                # Gestion Headers (Logique standard DAT)
-                # On essaie de détecter des headers connus, sinon on prend la ligne 1
-                detected_headers = []
-                # ... (Votre bloc de détection header_map existant si vous l'avez, sinon optionnel) ...
-                
-                if self.data and not self.headers:
-                    # Comportement standard : La ligne 1 est le titre
-                    self.headers = self.data.pop(0) 
-
-            # Padding (Sécurité)
+            # --- GÉNÉRATION DES HEADERS GÉNÉRIQUES (Col_01, Col_02...) ---
             if self.data:
+                # On trouve la ligne la plus longue pour savoir combien de colonnes créer
                 max_cols = max(len(row) for row in self.data)
-                # Si headers manquants
-                while len(self.headers) < max_cols: 
-                    self.headers.append(f"Col_{len(self.headers)+1}")
                 
-                # Si données manquantes
+                # On génère les noms : Col_01, Col_02... (zfill(2) met le zéro devant)
+                self.headers = [f"Col_{str(i+1).zfill(2)}" for i in range(max_cols)]
+                
+                # Padding (On s'assure que toutes les lignes ont la bonne longueur)
                 for row in self.data:
-                    if len(row) < len(self.headers):
-                        row.extend([""] * (len(self.headers) - len(row)))
+                    if len(row) < max_cols:
+                        row.extend([""] * (max_cols - len(row)))
             else:
                 self.headers = []
 
@@ -3364,7 +3513,7 @@ class DatEditor:
             self.last_search_index = -1
             self.modified = False
             
-            messagebox.showinfo("Ouverture", f"Fichier '{filename}' chargé dans l'éditeur.")
+            messagebox.showinfo("Ouverture", f"Fichier '{filename}' chargé.\n(Mode Headers Génériques)")
 
         except Exception as e:
             messagebox.showerror("Erreur", f"Impossible d'ouvrir le fichier :\n{e}")
